@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brain Dashboard</title>
+<!-- CSS order: vars → base → components → types → style.css (tab-specific
+     rules, loaded last). New code reaches for component/type classes first. -->
+<link rel="stylesheet" href="/static/css/vars.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/components.css">
+<link rel="stylesheet" href="/static/css/types.css">
+<link rel="stylesheet" href="/static/style.css">
+<!-- No external scripts; the graph renderer is Canvas 2D (tabs/graph.js). -->
+</head>
+<body>
+
+<!-- Tab order follows the brain's own scale vocabulary — the same names the
+     Traces scale filter uses (S1 = turn, S2 = graph), so a tab and a filter
+     never call the same scale two different things. Reading order is
+     narrowest-scope to widest: this turn, the streams having turns, the graph
+     they all write into, then the raw record and the errors. -->
+<div class="tabs">
+  <div class="tab active" data-tab="live"     onclick="switchTab('live')">Live <span class="tab-sub">S1</span></div>
+  <div class="tab"        data-tab="streams"  onclick="switchTab('streams')">Streams <span class="tab-sub">sessions</span></div>
+  <!-- Thalamus sits next to Streams because it is the other half of the same
+       conversation: Streams is the streams speaking to each other, Thalamus is
+       the brain speaking to them. The badge counts items still open. -->
+  <div class="tab"        data-tab="thalamus" onclick="switchTab('thalamus')">Thalamus <span id="thalamus-badge" class="notif"></span></div>
+  <div class="tab"        data-tab="s2"       onclick="switchTab('s2')">Graph <span class="tab-sub">S2</span></div>
+  <div class="tab"        data-tab="traces"   onclick="switchTab('traces')">Traces</div>
+  <div class="tab"        data-tab="logs"     onclick="switchTab('logs')">Logs <span id="logs-badge" class="notif"></span></div>
+  <!-- ⋯ overflow — Explorer + Overview live here. The button is a tab visually
+       but never gets an associated tab-content; switching to one of the
+       overflow items leaves the ⋯ button in its “active” state via the
+       data-overflow-active attribute set by switchTab. -->
+  <div class="tab-overflow">
+    <div class="tab tab-overflow-toggle" onclick="toggleOverflowMenu(event)">⋯</div>
+    <div class="tab-overflow-menu" id="tab-overflow-menu">
+      <div class="tab-overflow-item" data-tab="journals" onclick="switchTab('journals')">Journals</div>
+      <div class="tab-overflow-item" data-tab="explorer" onclick="switchTab('explorer')">Explorer</div>
+      <div class="tab-overflow-item" data-tab="overview" onclick="switchTab('overview')">Overview</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Live tab ──────────────────────────────────────────────────────
+     The session as it happens: the graph on one side, a chronological feed
+     of S1 activity on the other — surface runs and encode runs interleaved
+     on one time axis, each rendered as itself. Encoding fires every Nth
+     turn, recognition every turn, so they don't pair. S2 (the graph
+     integrating itself between sessions) has its own tab; it is a different
+     time-scale.
+     The divider is draggable and the split persists (localStorage:
+     dashboard.liveSplitPct); drag it to 100% for a full-screen graph. -->
+<div id="tab-live" class="tab-content active">
+  <div class="stats-bar" id="stats-bar"></div>
+  <div id="daemon-banner"></div>
+  <!-- Layout picker — inline strip above the split so it never covers
+       content; glyphs = graph left/right/top/bottom. The active button gets
+       the accent color via setLiveLayout in live.js. -->
+  <div class="live-toolbar">
+    <div class="live-layout-picker" role="group" aria-label="Live tab layout">
+      <button class="live-layout-btn" data-layout="graph-left"   title="Graph on left"     onclick="setLiveLayout('graph-left')">&#9703;</button>
+      <button class="live-layout-btn" data-layout="graph-right"  title="Graph on right"    onclick="setLiveLayout('graph-right')">&#9704;</button>
+      <button class="live-layout-btn" data-layout="graph-top"    title="Graph on top"      onclick="setLiveLayout('graph-top')">&#11154;</button>
+      <button class="live-layout-btn" data-layout="graph-bottom" title="Graph on bottom"   onclick="setLiveLayout('graph-bottom')">&#11155;</button>
+    </div>
+    <!-- Graph show/hide. Default state is width-driven (see live.js):
+         narrow/embedded views keep the canvas graph torn down so its render
+         loop never spins. Label + state set by _applyGraphVisibility(). -->
+    <button class="live-graph-toggle" id="graph-toggle-btn" onclick="toggleGraph()" title="Show/hide graph">Graph</button>
+  </div>
+  <div class="live-split" id="live-split">
+    <div class="live-pane live-pane--graph">
+      <div class="graph-container">
+        <div class="graph-controls">
+          <input
+            type="text"
+            id="graph-search"
+            class="graph-search"
+            placeholder="Search nodes / communities…"
+            oninput="onGraphSearch()"
+            onkeydown="onGraphSearchKey(event)">
+          <span id="graph-search-count" class="graph-search-count"></span>
+          <button class="btn--glass" title="Clear highlight + reload graph" onclick="onGraphRefresh()">Refresh</button>
+        </div>
+        <div id="graph-3d" style="width:100%;height:100%"></div>
+      </div>
+    </div>
+    <div class="live-divider" id="live-divider" title="Drag to resize"></div>
+    <div class="live-pane live-pane--stream">
+      <!-- Insights panel — runtime-signal cards. Empty by default;
+           the :empty CSS pseudo-class collapses padding when nothing
+           is firing so the feed stays tight. Populated by live.js
+           subscribing to the `insights:tick` bus topic. -->
+      <div id="insights-panel" class="insights-panel"></div>
+      <!-- Stream rail — one pill per stream of thought, each in its own hue.
+           With several streams live at once, the feed interleaves their
+           activity, so identity has to be visible rather than selected.
+           Click a pill to focus the feed on it; dormant streams collapse
+           behind a count. Populated by live.js. -->
+      <div class="stream-rail" id="stream-rail"></div>
+      <div class="feed feed--activity" id="feed-activity"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Detail overlay — shared by Graph (node click), Explorer (card click),
+     Live (candidate click). Lives outside any tab-content. -->
+<div class="node-detail" id="node-detail" style="display:none"></div>
+
+<div id="tab-explorer" class="tab-content">
+  <div class="explorer">
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="Search nodes..." onkeyup="searchNodes()">
+      <select id="type-filter" onchange="searchNodes()">
+        <option value="">All types</option>
+      </select>
+    </div>
+    <div id="node-list"></div>
+  </div>
+</div>
+
+<div id="tab-logs" class="tab-content">
+  <!-- One unified feed: brain + hook + dashboard + client, identical error
+       types grouped (×N), click a row to expand the full traceback. -->
+  <div style="display:flex;gap:8px;align-items:center;padding:6px 8px">
+    <select id="log-source" class="toolbar-select" onchange="loadLogs()" title="Filter by source">
+      <option value="all">All sources</option>
+      <option value="brain">Brain</option>
+      <option value="hook">Hook</option>
+      <option value="dashboard">Dashboard</option>
+      <option value="client">Client (JS)</option>
+    </select>
+    <select id="log-level" class="toolbar-select" onchange="loadLogs()" title="Filter by severity">
+      <option value="all">All levels</option>
+      <option value="error">Errors</option>
+      <option value="warning">Warnings</option>
+    </select>
+    <select id="error-hours" class="toolbar-select" onchange="loadLogs()">
+      <option value="1">1h</option>
+      <option value="6">6h</option>
+      <option value="24" selected>24h</option>
+      <option value="168">7d</option>
+    </select>
+    <span id="logs-count" style="color:#666;font-size:11px;margin-left:auto"></span>
+  </div>
+  <div class="feed" id="feed-logs"></div>
+</div>
+
+<!-- ── Journals tab ───────────────────────────────────────────────────
+     Every encoder's residue in one place. Standing items lead: a note the
+     encoder has re-raised across many runs without resolution is it asking
+     a question with nowhere to send it — this view is the route out. -->
+<div id="tab-journals" class="tab-content">
+  <div class="journals-toolbar">
+    <input type="text" id="journals-search" class="journals-search"
+           placeholder="Search notes and subjects…" oninput="onJournalsSearch()">
+    <span id="journals-count" class="journals-count"></span>
+    <select id="journals-hours" class="toolbar-select" onchange="onJournalsHoursChange()">
+      <option value="24">24h</option>
+      <option value="48">48h</option>
+      <option value="168" selected>7d</option>
+      <option value="720">30d</option>
+    </select>
+  </div>
+  <div class="journals-filters" id="journals-filters"></div>
+  <div class="journals-standing" id="journals-standing"></div>
+  <div class="feed" id="feed-journals"></div>
+</div>
+
+<!-- ── S2 tab ────────────────────────────────────────────────────────
+     The brain integrating itself between sessions. Four units, run in the
+     order coordinator.run_s2 executes them; the pills are both a summary
+     (how many runs, how much residue, how long since the last one) and the
+     unit filter. Every card carries the same journal chip as everything
+     else — S2 units write the most residue and had the least visibility. -->
+<div id="tab-s2" class="tab-content">
+  <div class="s2-toolbar">
+    <div class="s2-summary" id="s2-summary"></div>
+    <select id="s2-hours" class="toolbar-select" onchange="onS2HoursChange()" style="margin-left:auto">
+      <option value="24">24h</option>
+      <option value="48" selected>48h</option>
+      <option value="168">7d</option>
+    </select>
+  </div>
+  <div class="feed" id="feed-s2"></div>
+</div>
+
+<div id="tab-overview" class="tab-content">
+  <h3 style="color:#888;margin:12px 8px 8px;font-size:13px">System Status</h3>
+  <div id="status-grid" style="padding:0 8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px"></div>
+  <h3 style="color:#888;margin:20px 8px 8px;font-size:13px">Aspect taxonomy (14 aspects classify node types + edge relations)</h3>
+  <div id="aspects-grid" style="padding:0 8px"></div>
+  <div class="health" id="health-content"></div>
+</div>
+
+<div id="tab-traces" class="tab-content">
+  <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;padding:4px 8px">
+    <div class="feed-toggle" style="margin-right:2px">
+      <button class="feed-btn" id="trace-mode-friendly" onclick="setTraceMode('friendly')">✨ Friendly</button>
+      <button class="feed-btn" id="trace-mode-technical" onclick="setTraceMode('technical')">🔧 Technical</button>
+    </div>
+    <select id="trace-scale-filter" class="toolbar-select" onchange="onTraceScaleChange()">
+      <option value="">All scales</option>
+      <option value="s0">S0 (Exchange)</option>
+      <option value="s1">S1 (Turn)</option>
+      <option value="s2">S2 (Graph)</option>
+      <option value="s3">S3 (Sleep)</option>
+      <option value="s4">S4 (Growth)</option>
+    </select>
+    <select id="trace-hours-filter" class="toolbar-select" onchange="loadTraces()">
+      <option value="1">Last hour</option>
+      <option value="6">Last 6h</option>
+      <option value="24" selected>Last 24h</option>
+      <option value="168">Last 7d</option>
+    </select>
+    <select id="trace-session-filter" class="toolbar-select" onchange="loadTraces()">
+      <option value="">All sessions</option>
+    </select>
+    <span id="trace-count" style="color:#888;font-size:11px"></span>
+  </div>
+  <div id="traces-content"></div>
+</div>
+
+<!-- ── Streams tab ───────────────────────────────────────────────────
+     Self↔self channel observability, read as a CHAT: the conversation is the
+     headline (left/top), the roster of who's talking is the rail beside it
+     (which stacks under the chat on a narrow window). The log is the courier
+     (self_inflight + its delivery fan-out); the composer is the dashboard's
+     one write path, daemon-mediated (POST /api/self-send → daemon self_send),
+     and the operator sends attributed — never masquerading as a stream. -->
+<div id="tab-streams" class="tab-content">
+  <div class="streams-layout">
+
+    <!-- The open conversation — oldest at top, newest at the bottom above the
+         composer, the way every chat the operator already knows reads. -->
+    <section class="chat-col">
+      <header class="chat-head">
+        <span class="chat-title" id="chat-title">💬 All messages</span>
+        <span class="chat-sub" id="chat-sub">what the streams of thought are saying to each other</span>
+        <select id="streams-hours" class="toolbar-select" onchange="loadStreams()" style="margin-left:auto">
+          <option value="24">24h</option>
+          <option value="48" selected>48h</option>
+          <option value="168">7d</option>
+        </select>
+        <span id="streams-count" class="chat-count"></span>
+      </header>
+
+      <!-- Thread header — WHO this conversation is with: the stream's own pane
+           (arc, cwd, turns, and its boot context on click). Empty for the
+           All / Everyone threads, which have no single counterpart. -->
+      <div class="chat-thread" id="chat-thread"></div>
+
+      <div class="chat-log" id="feed-streams-messages"></div>
+
+      <!-- Composer pinned at the foot of the conversation, chat-style. The
+           recipient follows the open thread; the dropdown stays reachable for
+           sending somewhere else without leaving the thread you're reading. -->
+      <div class="chat-composer" id="streams-compose">
+        <label class="chat-to-label" for="streams-send-to">To</label>
+        <select id="streams-send-to" class="toolbar-select" title="Recipient stream (or broadcast)">
+          <option value="broadcast">everyone (broadcast)</option>
+        </select>
+        <input id="streams-send-body" type="text" class="chat-input"
+               placeholder="Say something to a stream of thought…"
+               onkeydown="onStreamsSendKey(event)">
+        <button class="btn--glass chat-send" onclick="onStreamsSend()">Send</button>
+        <span id="streams-send-status" class="chat-send-status"></span>
+      </div>
+    </section>
+
+    <!-- Conversation list — one row per stream of thought (plus Everyone, for
+         the broadcasts, and All, the merged firehose). Liveness lives on the
+         row, so this single column answers both "who is live" and "who is
+         talking to whom". -->
+    <aside class="streams-rail">
+      <div class="conv-list" id="conv-list"></div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- ── Thalamus tab ──────────────────────────────────────────────────
+     The brain's standing-intent queue — the other direction of the Streams
+     conversation. An item is an ask, a reminder or a notice; it lives until
+     it is answered, dismissed or expires, and the ledger under each card says
+     which sessions actually saw it, and at which moment (boot / stop). -->
+<div id="tab-thalamus" class="tab-content">
+  <div class="thal-toolbar">
+    <div class="thal-summary" id="thal-summary"></div>
+    <select id="thalamus-scope" class="toolbar-select" onchange="loadThalamus()" style="margin-left:auto">
+      <option value="all" selected>Open + recently closed</option>
+      <option value="open">Open only</option>
+    </select>
+    <select id="thalamus-hours" class="toolbar-select" onchange="loadThalamus()">
+      <option value="24">24h</option>
+      <option value="168" selected>7d</option>
+      <option value="720">30d</option>
+    </select>
+    <span id="thalamus-count" class="thal-count"></span>
+  </div>
+  <div class="feed" id="feed-thalamus"></div>
+</div>
+
+<!-- Main app — type=module enables ES imports, no build step needed. -->
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

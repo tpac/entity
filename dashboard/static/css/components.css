@@ -1,0 +1,1395 @@
+/* ==========================================================================
+   Component classes — every repeated UI element gets ONE base class +
+   modifiers, so panels reach for a class instead of open-coding
+   `style="background:#111118;border-left:..."`.
+
+   Modifier naming:  .chip .chip--model   .enc-kind .enc-kind--kept
+   Colors come from the tokens in vars.css (--accent-green, etc).
+   ========================================================================== */
+
+/* ── Chip — inline pill ─────────────────────────────────────────────── */
+
+.chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  border: 1px solid transparent;
+}
+
+/* Model chip — the S0 session stamp: which model produced the turn. */
+.chip--model {
+  color: #8ab;
+  background: #14202a;
+  border-color: #1f3340;
+  letter-spacing: 0.2px;
+}
+
+/* ── Notification badge (red number bubble on tab labels / buttons) ── */
+
+.notif {
+  display: none;
+  background: #ff4466;
+  color: #fff;
+  border-radius: var(--space-2);
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  margin-left: var(--space-1);
+}
+.notif.show { display: inline; }
+
+/* Floating glass-style button used in the graph controls. */
+.btn--glass {
+  background: rgba(26, 26, 42, 0.8);
+  border: 1px solid var(--border-base);
+  color: var(--text-heading);
+  padding: 5px 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  backdrop-filter: blur(4px);
+}
+.btn--glass:hover { background: #2a2a4a; }
+
+/* ── Run-card sub-rows ─────────────────────────────────────────────── */
+/* Sub-row shapes inside activity and S2 run cards (lib/cards.js,
+ * tabs/s2.js). */
+.enc-tier-row { padding: 2px 0; color: var(--text-muted); font-size: var(--fs-sm); }
+.enc-sub-row { margin: 2px 0; padding: 4px 8px; }
+.enc-sub-row--clickable { cursor: pointer; }
+.enc-sub-row--archived  { opacity: 0.6; }
+.enc-meta-line       { color: var(--text-muted); font-size: var(--fs-xs); margin-top: 2px; padding-left: 4px; }
+.enc-meta-line--dim  { color: var(--text-subtle); }
+.enc-empty-note { color: var(--text-subtle); font-size: var(--fs-sm); padding: 4px 8px; }
+.feed-empty     { color: var(--text-muted); padding: 20px; text-align: center; }
+
+.feed-empty--error { color: #f66; text-align: left; }
+
+/* ── Overview tab: system-status cards ────────────────────────────── */
+.status-card {
+  background: var(--bg-panel);
+  border-radius: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-base);
+}
+.status-card--alive { border-color: #1a3a1a; }
+.status-card--dead  { border-color: #3a1a1a; }
+.status-card-row    { display: flex; align-items: center; gap: 8px; }
+.status-card-icon   { font-size: 20px; }
+.status-card-title  { color: var(--text-heading); font-weight: bold; font-size: 13px; }
+.status-card-state  { font-size: 11px; margin-top: 2px; }
+.status-card-state--alive { color: #4a4; }
+.status-card-state--dead  { color: #f44; }
+.status-card-details {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status-card-path {
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+/* ── Overview tab: aspect taxonomy cards ──────────────────────────── */
+.aspect-card {
+  background: var(--bg-panel);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 6px 0;
+  border-left: 3px solid var(--accent-cyan);
+}
+.aspect-card-head   { display: flex; justify-content: space-between; align-items: baseline; }
+.aspect-card-name   { color: var(--accent-blue); font-weight: bold; font-size: 13px; }
+.aspect-card-totals { color: var(--text-muted); font-size: 10px; }
+.aspect-card-dim    { color: var(--text-subtle); font-size: 10px; margin-left: 6px; }
+.aspect-card-locked { color: var(--accent-amber); font-size: 9px; }
+.aspect-card-meaning {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+.aspect-card-section { margin-top: 6px; }
+.aspect-card-section-label {
+  color: var(--text-subtle);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.aspect-chip {
+  display: inline-block;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-base);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  margin: 2px 3px 0 0;
+}
+.aspect-chip--type     { color: var(--text-body); }
+.aspect-chip--relation { color: var(--accent-purple); }
+.aspect-chip-count     { color: var(--text-subtle); margin-left: 4px; }
+.aspect-chip-more      { color: var(--text-subtle); font-size: 10px; margin-left: 4px; }
+
+/* ── Overview tab: diagnostic insight cards (distinct from Live's
+ * lightweight .insights-card — these are larger, can include
+ * evidence nodes, and use the H/M/L severity ladder). ──────────── */
+.health-insight {
+  background: var(--bg-panel);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 8px 0;
+  border-left: 4px solid var(--border-base);
+}
+.health-insight--high   { border-left-color: var(--accent-red); }
+.health-insight--medium { border-left-color: var(--accent-amber); }
+.health-insight--low    { border-left-color: var(--accent-blue); }
+.health-insight-title   { font-size: 15px; font-weight: bold; }
+.health-insight--high   .health-insight-title { color: var(--accent-red); }
+.health-insight--medium .health-insight-title { color: var(--accent-amber); }
+.health-insight--low    .health-insight-title { color: var(--accent-blue); }
+.health-insight-detail  {
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.health-insight-nodes      { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
+.health-insight-node-meta  { color: var(--text-subtle); }
+
+/* ── Overview tab: section headings + summary states ──────────────── */
+.health-section-h3        { color: var(--text-heading); margin: 20px 0 8px; font-size: 14px; }
+.health-section-h3--muted { color: var(--text-muted); }
+.health-empty-good {
+  color: var(--accent-green);
+  padding: 20px;
+  text-align: center;
+  font-size: 16px;
+}
+.type-count { font-size: 18px; font-weight: bold; color: var(--accent-blue); float: right; }
+
+/* ── node-detail panel sub-classes ────────────────────────────────── */
+/* The .nd-* base classes (.nd-title, .nd-content, .nd-conn, etc.) live
+ * in style.css; these add the per-section bits. Dynamic per-row colors
+ * (scale color, edge direction color) pass through inline `style` because
+ * they're data, not design. */
+.nd-loading        { color: var(--text-muted); padding: 20px; }
+.nd-correction-of  { color: var(--accent-blue); cursor: pointer; }
+.nd-conn-missing   { opacity: 0.5; }
+.nd-conn-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.nd-conn-summary   { color: var(--text-body); font-size: 11px; }
+.nd-conn-trace     { color: var(--text-subtle); font-size: 9px; margin-top: 2px; }
+.nd-conn-edge-why  { color: var(--text-muted); font-size: 10px; margin-top: 3px; font-style: italic; }
+.nd-conn-content   { color: #aaa; font-size: 11px; margin-top: 3px; }
+.nd-conn-quote     { color: var(--accent-blue); font-size: 10px; margin-top: 3px; }
+.nd-conn-empty     { color: var(--text-subtle); padding: 8px; }
+
+/* Timestamps row — three pills with relative time + absolute tooltip. */
+.nd-times      { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 10px; }
+.nd-time-pill  { display: flex; flex-direction: column; line-height: 1.2; }
+.nd-time-label { color: var(--text-subtle);  font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; }
+.nd-time-rel   { color: var(--text-heading); font-size: 12px; font-weight: bold; }
+.nd-time-abs   { color: var(--text-subtle);  font-size: 10px; }
+
+/* Field row: monospaced value for arbitrary scalar fields (numbers, booleans). */
+.nd-field-mono { font-family: var(--font-mono); color: var(--text-body); }
+
+/* Source-ref clickable affordance. The dynamic accent-stripe color is
+ * set via inline `style` because it's data (scale color), not design. */
+.nd-conn--clickable { cursor: pointer; }
+.nd-conn--clickable:hover { background: var(--bg-raised); }
+.nd-conn-action {
+  color: var(--accent-blue);
+  font-size: 10px;
+  margin-top: 4px;
+  font-style: italic;
+}
+
+/* ── Source-ref prominence (the --source modifier set) ──────────────
+ * Source-refs are the most actionable thing in the panel — they connect
+ * a memory back to the conversation event that produced it. Default
+ * .nd-section / .nd-conn (defined with `.node-detail` prefix in
+ * style.css) render them like any other list, which buried them. These
+ * modifier rules need the `.node-detail` ancestor too to match that
+ * specificity — without it the style.css rules win and the source-ref
+ * section keeps its muted gray look.
+ *   - bump the section heading to a bigger, accent-colored label
+ *   - tint the card background so it visually clusters as its own group
+ *   - widen the left accent strip
+ *   - promote "→ Open in Traces tab" from italic afterthought to a real
+ *     chip button so the click affordance reads at a glance */
+/* Specificity boost — style.css loads AFTER components.css and
+ * has `.node-detail .nd-section { color: #888 }` at the same specificity
+ * as `.node-detail .nd-section--source`. Stacking both classes onto the
+ * same element (.nd-section.nd-section--source) bumps us to (0,3,0)
+ * which beats the style.css rule cleanly without !important. Same trick
+ * for the card. */
+.node-detail .nd-section.nd-section--source {
+  font-size: 12px;
+  color: var(--accent-blue);
+  font-weight: bold;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-top: 14px;
+  margin-bottom: 6px;
+}
+.node-detail .nd-conn.nd-conn--source {
+  background: rgba(126, 184, 255, 0.04);
+  border-left-width: 4px;
+  padding: 10px 12px;
+  margin: 4px 0;
+  border-radius: var(--radius-md);
+  transition: background-color 0.15s;
+}
+.node-detail .nd-conn.nd-conn--source:hover {
+  background: rgba(126, 184, 255, 0.12);
+}
+.node-detail .nd-conn.nd-conn--source .nd-conn-action {
+  display: inline-block;
+  padding: 3px 10px;
+  margin-top: 8px;
+  background: rgba(126, 184, 255, 0.12);
+  border: 1px solid rgba(126, 184, 255, 0.35);
+  border-radius: var(--radius-md);
+  color: var(--accent-blue);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.node-detail .nd-conn.nd-conn--source:hover .nd-conn-action {
+  background: rgba(126, 184, 255, 0.25);
+  border-color: rgba(126, 184, 255, 0.6);
+}
+
+/* ── Graph error fallback ─────────────────────────────────────────── */
+/* Shown when the graph has no data or its load fails (tabs/graph.js) —
+ * tells the user *why* the pane is blank instead of leaving it silent. */
+.graph-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+}
+.graph-error-title { color: var(--accent-red); font-weight: bold; font-size: 14px; }
+.graph-error-msg   { color: var(--text-body); font-family: var(--font-mono); font-size: 11px; max-width: 80%; }
+
+.hook-body--padded { padding: 4px 12px; }
+
+/* ── Insights panel (Live tab top) ─────────────────────────────────── */
+/* Runtime-signal cards rendered above the activity stream. Severity
+ * controls the left accent stripe + title color. */
+.insights-panel { padding: 8px; }
+.insights-panel:empty { display: none; }
+.insights-card {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 4px 0;
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  border-left: 3px solid var(--border-base);
+}
+.insights-card--low    { border-left-color: var(--accent-blue); }
+.insights-card--medium { border-left-color: var(--accent-amber); }
+.insights-card--high   { border-left-color: var(--accent-red); }
+.insights-icon  { font-size: 18px; line-height: 1.4; flex-shrink: 0; }
+.insights-body  { flex: 1; min-width: 0; }
+.insights-title { font-weight: bold; color: var(--text-heading); font-size: var(--fs-md); }
+.insights-card--medium .insights-title { color: var(--accent-amber); }
+.insights-card--high   .insights-title { color: var(--accent-red); }
+.insights-detail {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+/* Dismiss button — × in the top-right of each card. Per-page-session
+ * suppression only; reload = fresh signal. Keep visual weight low so
+ * the card content reads first. */
+.insights-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-subtle);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+  align-self: flex-start;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.insights-dismiss:hover { color: var(--text-heading); background: var(--bg-raised); }
+
+/* ── Trace-event scroll-target flash ────────────────────────────────
+ * Applied to a .trace-event in the Traces tab when the user navigates
+ * there via "Open in Traces tab" from a node-detail source-ref. The
+ * keyframes pulse the background twice over 2s so the operator's eye
+ * lands on the correct row — the Traces tab can show hundreds of
+ * events per session and without this the navigation just dumps the
+ * user into a scrolled list with no visible anchor. */
+@keyframes traceTargetFlash {
+  0%   { background: rgba(255, 234, 0, 0.45);    box-shadow: inset 0 0 0 1px rgba(255, 234, 0, 0.8); }
+  60%  { background: rgba(255, 234, 0, 0.15);    box-shadow: inset 0 0 0 1px rgba(255, 234, 0, 0.4); }
+  100% { background: transparent;                box-shadow: inset 0 0 0 1px transparent; }
+}
+.trace-event--target {
+  animation: traceTargetFlash 2.2s ease-out 1;
+}
+
+/* ── Run-card sub-row color variants ─────────────────────────────────
+ * Each variant is a semantic name for a static color pair so the JS stays
+ * in el() form. The per-unit colors (S2 unit.fg for badge bg) stay inline
+ * `style` because they're data (unit identity), not design. */
+.enc-kind--archived { background: #663333; color: #ff8888; }
+.enc-kind--evolved  { background: #444400; color: #ffcc00; }
+.enc-kind--kept     { background: #003344; color: #45B7D1; }
+.enc-kind--corrects { background: #4a2a1a; color: #ff8866; }
+
+/* O / K / Δ tier labels in the S2 default (community) card. Healer
+ * uses its unit color via inline style; only the default branch had
+ * fixed cyan/amber/green labels worth promoting to classes. */
+.enc-tier-label--o     { color: var(--accent-cyan); font-weight: bold; }
+.enc-tier-label--k     { color: var(--accent-amber); font-weight: bold; }
+.enc-tier-label--delta { color: var(--accent-green); font-weight: bold; }
+
+/* "source —relation→ target" rows in S1 encoding cards. */
+.enc-edge-arrow    { color: var(--accent-purple); }
+.enc-edge-overflow {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+}
+
+/* Community sub-row in default S2 cards. Maturity color stays inline
+ * because it's data (settled/active/forming → green/yellow/cyan). */
+.enc-community-row {
+  margin: 3px 0;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.enc-community-maturity {
+  font-size: var(--fs-xs);
+  font-weight: bold;
+  margin-right: 4px;
+}
+.enc-community-members {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  margin-left: 6px;
+}
+
+/* Prompt-body collapsible block — S1 encoding card and consol card both
+ * use this shape (pre with a max-height + scroll). */
+.enc-prompt-pre {
+  white-space: pre-wrap;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  max-height: 600px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Encoder journals — one visual language for every encoder's residue.
+   Owned by lib/journal.js. The tag accents are HINTS: tags are open text
+   by contract, so an unlisted tag renders neutral rather than being
+   forced into a bucket.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.journal-block {
+  margin: 4px 0 8px;
+  padding: 6px 8px 4px;
+  background: rgba(196, 168, 240, 0.045);
+  border-left: 2px solid var(--accent-purple);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.journal-block-label {
+  font-size: var(--fs-xxs);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent-purple);
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.journal-row { padding: 3px 0; }
+.journal-row + .journal-row { border-top: 1px solid rgba(255, 255, 255, 0.04); }
+.journal-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.journal-note {
+  color: var(--text-body);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.journal-tag {
+  font-size: var(--fs-xxs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.journal-tag--open     { background: #3a2a1a; color: var(--accent-amber); }
+.journal-tag--friction { background: #3a1a1a; color: #ff9977; }
+.journal-tag--doubt    { background: #1a2a4a; color: var(--accent-blue); }
+.journal-tag--surprise { background: #2a1a3a; color: var(--accent-purple); }
+.journal-tag--failure  { background: #4a1a1a; color: var(--accent-red); }
+.journal-tag--resolved { background: #1a3a1a; color: var(--accent-green); }
+
+/* Lifecycle age — "×4 since 08-17". Its own pill because it is the note's
+ * AGE, not its kind; folding it into the tag is what fragmented the
+ * grouping key in the first place. */
+.journal-life {
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+  color: var(--accent-amber);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+.journal-unit {
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+  color: var(--accent-cyan);
+  opacity: 0.85;
+}
+.journal-subject {
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.journal-subject--clickable { cursor: pointer; color: var(--accent-blue); }
+.journal-subject--clickable:hover { text-decoration: underline; }
+
+/* An item the encoder has re-flagged past the nudge threshold: it asked
+ * and asked and nothing answered. The whole reason this view exists. */
+.journal-row--standing { background: rgba(255, 170, 51, 0.06); }
+.journal-standing-flag {
+  font-size: var(--fs-xxs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-amber);
+  color: #1a1200;
+}
+
+/* ── The 📓 header chip — read residue without expanding the run ────── */
+.journal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  border-radius: var(--radius-lg);
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.journal-chip:hover { border-color: var(--accent-purple); color: var(--text-body); }
+.journal-chip--standing { border-color: var(--accent-amber); }
+.journal-chip-count { font-family: var(--font-mono); font-size: var(--fs-xxs); }
+
+/* ── The peek popover ──────────────────────────────────────────────── */
+.journal-peek-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 5, 12, 0.72);
+  backdrop-filter: blur(3px);
+}
+.journal-peek-scrim.open { display: flex; }
+.journal-peek {
+  width: min(680px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-base);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 24px 70px -20px #000;
+}
+.journal-peek-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.journal-peek-title { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+.journal-peek-name {
+  color: var(--text-heading);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.journal-peek-count { color: var(--text-subtle); font-size: var(--fs-sm); font-family: var(--font-mono); }
+.journal-peek-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.journal-peek-close:hover { color: var(--text-body); }
+.journal-peek-body { overflow-y: auto; padding: 8px 12px 12px; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Session identity — owned by lib/sessions.js. A stream is a name and a
+   hue; the hue is what keeps several live streams legible when their
+   streams interleave in one chronological feed.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.session-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  max-width: 22ch;
+  cursor: help;
+}
+.session-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   The stream rail — who is thinking, and which stream the feed is on.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.stream-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.stream-rail:empty { display: none; }
+
+.stream-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-base);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  max-width: 24ch;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.stream-pill:hover { color: var(--text-body); border-color: var(--border-strong); }
+.stream-pill--active {
+  border-color: var(--stream-color, var(--accent-blue));
+  background: color-mix(in srgb, var(--stream-color, var(--accent-blue)) 12%, transparent);
+  color: var(--text-body);
+}
+.stream-pill--dormant { opacity: 0.55; }
+/* The collapsed resting group. Dashed so it reads as a container, not a stream. */
+.stream-pill--more {
+  border-style: dashed;
+  color: var(--text-subtle);
+  font-size: var(--fs-xxs);
+}
+.stream-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stream-pill-count { color: var(--text-subtle); font-size: var(--fs-xxs); }
+.stream-pill-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; opacity: 0.55; }
+/* A live stream breathes. Dormant ones hold still — the difference should be
+ * visible without reading the label. */
+.stream-pill-dot--live { opacity: 1; animation: streamBreath 2.6s ease-in-out infinite; }
+@keyframes streamBreath {
+  0%, 100% { transform: scale(1);    opacity: 1; }
+  50%      { transform: scale(0.72); opacity: 0.5; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stream-pill-dot--live { animation: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   S1 activity — surface runs and encode runs on one time axis, each
+   rendered as itself: recognition and encoding don't align turn-for-turn,
+   so it's one column, one kind per card.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.act {
+  border-left: 2px solid var(--border-base);
+  border-bottom: 1px solid var(--border-faint);
+  padding: 5px 8px 5px 9px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.act:hover { background: rgba(126, 184, 255, 0.045); }
+/* An encode run changed the graph — structurally different from a recall,
+ * which only read it. Worth a weight difference, not just a badge. */
+.act--encode { background: rgba(170, 102, 255, 0.05); }
+.act--pinned { background: rgba(126, 184, 255, 0.1); }
+.act.card--standing { box-shadow: inset 2px 0 0 var(--accent-amber); }
+
+.act-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.act-time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-subtle);
+  flex: 0 0 auto;
+}
+.act-stop { font-family: var(--font-mono); font-size: var(--fs-xxs); color: var(--text-faint); }
+.act-head-tail { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.act-caret { color: var(--text-faint); font-size: var(--fs-xs); transition: transform 0.15s; }
+.act.open .act-caret { transform: rotate(90deg); }
+
+/* Which of the two processes this row is. The badge carries it, so the two
+ * never need to be told apart by layout. */
+.act-badge {
+  font-size: var(--fs-xxs);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.act-badge--surface { background: rgba(69, 183, 209, 0.16); color: var(--accent-cyan); }
+.act-badge--encode  { background: rgba(170, 102, 255, 0.2); color: var(--accent-purple); }
+
+.act-count { font-size: var(--fs-xs); font-family: var(--font-mono); }
+.act-count--surface { color: var(--accent-cyan); }
+.act-count--created { color: var(--accent-green); }
+.act-count--revised { color: var(--accent-amber); }
+.act-count--edge    { color: var(--accent-purple); }
+.act-count--none    { color: var(--text-faint); }
+
+.act-src {
+  font-size: var(--fs-xxs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+}
+.act-src--mcp      { color: var(--role-mcp); }
+.act-src--hook     { color: var(--role-hook); }
+.act-src--internal { color: var(--text-subtle); }
+/* The chip carrying a model id instead of the "turn" word: an identifier, so
+ * no uppercasing, and monospaced like the other stamps. */
+.act-src--model    { text-transform: none; letter-spacing: 0; font-family: var(--font-mono); }
+
+/* The query (or the encoder's prompt line) — what was actually being thought
+ * about. Full width under the header, so a row says something collapsed. */
+.act-query {
+  flex: 1 0 100%;
+  margin: 3px 0 0;
+  padding-left: 7px;
+  border-left: 2px solid;
+  color: var(--text-heading);
+  font-size: var(--fs-md);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.act-query--dim { color: var(--text-muted); font-size: var(--fs-sm); }
+
+/* ── Expanded body — one column ─────────────────────────────────────── */
+.act-body { display: none; }
+.act.open .act-body {
+  display: block;
+  margin-top: 8px;
+  padding: 6px 8px 8px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
+  cursor: default;
+}
+.act-pane-empty {
+  color: var(--text-subtle);
+  font-size: var(--fs-sm);
+  font-style: italic;
+  padding: 4px 2px;
+  line-height: 1.5;
+}
+
+/* What actually reached Claude. */
+.act-surfaced pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 6px;
+  padding: 5px 7px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: rgba(69, 183, 209, 0.05);
+  border-left: 2px solid var(--accent-cyan);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-body);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.act-candidates { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.act-candidate {
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-subtle);
+  cursor: pointer;
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.act-candidate:hover { color: var(--text-body); }
+/* The ones that won. The dim/solid split is the point: it shows whether recall
+ * had the right material and chose well, or never had it. */
+.act-candidate--used { background: rgba(69, 183, 209, 0.16); color: var(--accent-cyan); }
+.act-candidate--more { background: transparent; color: var(--text-faint); cursor: default; }
+.act-prompt-row { margin-top: 6px; }
+.card-prompt-body { margin-top: 4px; }
+.card-header-tail { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   S2 tab — unit pills double as summary and filter.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.s2-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.s2-summary { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.s2-unit-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-base);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.s2-unit-pill:hover { color: var(--text-body); border-color: var(--border-strong); }
+.s2-unit-pill--active {
+  border-color: var(--unit-color);
+  background: color-mix(in srgb, var(--unit-color) 14%, transparent);
+  color: var(--text-body);
+}
+/* A unit with zero runs in the window is the signal, not the absence of one. */
+.s2-unit-pill--idle { opacity: 0.45; }
+.s2-unit-dot { width: 7px; height: 7px; border-radius: 50%; }
+.s2-unit-count { color: var(--text-body); font-weight: 600; }
+.s2-unit-notes { color: var(--accent-purple); font-size: var(--fs-xxs); }
+
+/* Any card carrying a long-lived open item. */
+.card--standing { box-shadow: inset 2px 0 0 var(--accent-amber); }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Recall panel — the brain's actual answer, as information.
+   Overlays the galaxy it describes: the list and the lit nodes are one
+   answer, so they share one field of view.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.recall-panel {
+  position: absolute;
+  left: 10px;
+  top: 52px;
+  bottom: 46px;
+  width: min(420px, 62%);
+  z-index: 6;
+  display: none;
+  flex-direction: column;
+  background: rgba(8, 10, 20, 0.93);
+  border: 1px solid var(--border-base);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 50px -18px #000;
+  backdrop-filter: blur(8px);
+}
+.recall-panel.open { display: flex; }
+
+.recall-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.recall-panel-title {
+  color: var(--accent-cyan);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+.recall-panel-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--text-subtle);
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+}
+.recall-meta-q { color: var(--text-heading); font-family: inherit; }
+.recall-meta-mode { color: var(--accent-amber); }
+/* Says out loud that looking here changes nothing. */
+.recall-meta-readonly {
+  color: var(--accent-green);
+  border: 1px solid rgba(51, 255, 136, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  cursor: help;
+}
+.recall-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.recall-panel-close:hover { color: var(--text-body); }
+.recall-panel-list { overflow-y: auto; padding: 4px 6px 8px; }
+.recall-panel-empty { color: var(--text-muted); font-size: var(--fs-sm); padding: 16px 8px; line-height: 1.5; }
+.recall-panel-error { color: var(--accent-red); }
+
+.recall-row {
+  padding: 6px 6px 5px;
+  border-bottom: 1px solid var(--border-faint);
+  cursor: pointer;
+}
+.recall-row:hover { background: rgba(69, 183, 209, 0.07); }
+.recall-row-head { display: flex; align-items: center; gap: 5px; }
+.recall-rank {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  min-width: 1.4em;
+}
+.recall-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-heading);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* WHY this result is here — the lane that found it. */
+.recall-lane {
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+  color: var(--accent-cyan);
+  background: rgba(69, 183, 209, 0.12);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  cursor: help;
+  white-space: nowrap;
+}
+.recall-score {
+  flex: 0 0 42px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-raised);
+  overflow: hidden;
+  cursor: help;
+}
+.recall-score-fill { display: block; height: 100%; background: var(--accent-cyan); }
+.recall-situation {
+  color: var(--accent-amber);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  margin: 2px 0 0 1.9em;
+  opacity: 0.85;
+}
+.recall-content {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  margin: 2px 0 0 1.9em;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.recall-row-foot {
+  display: flex;
+  gap: 8px;
+  margin: 3px 0 0 1.9em;
+  color: var(--text-faint);
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Journals tab — the encoders' inner voice, across every encoder.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.journals-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.journals-search {
+  flex: 1;
+  min-width: 160px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-base);
+  color: var(--text-body);
+  border-radius: var(--radius-md);
+  padding: 5px 9px;
+  font-size: var(--fs-md);
+}
+.journals-search:focus { outline: none; border-color: var(--accent-blue); }
+.journals-count { color: var(--text-subtle); font-size: var(--fs-xs); font-family: var(--font-mono); }
+
+.journals-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.journal-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-base);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.journal-filter:hover { color: var(--text-body); border-color: var(--border-strong); }
+.journal-filter--active { border-color: var(--accent-cyan); color: var(--text-body); background: rgba(69,183,209,0.12); }
+.journal-filter--tag.journal-filter--active { border-color: var(--accent-purple); background: rgba(170,102,255,0.14); }
+.journal-filter-count { color: var(--text-subtle); font-size: var(--fs-xxs); }
+.journal-filter-sep { width: 1px; height: 16px; background: var(--border-base); margin: 0 4px; }
+
+/* The block that justifies the tab: questions the encoders keep asking. */
+.journals-standing { padding: 0 8px; }
+.journals-standing:empty { display: none; }
+.journals-standing-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 8px 0 4px;
+  color: var(--accent-amber);
+  font-size: var(--fs-sm);
+}
+.journals-standing .journal-row {
+  background: rgba(255, 170, 51, 0.05);
+  border-left: 2px solid var(--accent-amber);
+  padding-left: 7px;
+  margin-bottom: 2px;
+}
+
+.journal-group {
+  border-bottom: 1px solid var(--border-faint);
+  padding: 6px 8px;
+}
+.journal-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.journal-group-unit {
+  font-size: var(--fs-xxs);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--accent-cyan);
+}
+.journal-group-time { color: var(--text-subtle); font-size: var(--fs-xs); font-family: var(--font-mono); }
+.journal-group-chain {
+  color: var(--text-faint);
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.journal-group-count { margin-left: auto; color: var(--text-faint); font-size: var(--fs-xxs); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Streams tab — the chat
+   -------------------------------------------------------------------
+   The conversation is the tab's main pane; the roster of who's talking
+   is the rail beside it (and under it on a narrow window). Reading
+   order is a chat's: oldest at the top, newest above the composer.
+   ═══════════════════════════════════════════════════════════════════ */
+
+#tab-streams.active { display: flex; flex-direction: column; overflow: hidden; }
+/* row-reverse, not a reordered DOM: the conversation list sits on the LEFT
+   where every messaging app puts it, while the markup keeps the conversation
+   first — so when the layout stacks on a narrow window (below), the chat is
+   what lands at the top of the page. */
+.streams-layout { display: flex; flex-direction: row-reverse; flex: 1; min-height: 0; }
+
+.chat-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.chat-head {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+.chat-title { color: var(--text-heading); font-size: var(--fs-lg); font-weight: 600; }
+.chat-sub   { color: var(--text-subtle); font-size: var(--fs-sm); }
+.chat-count { color: var(--text-muted);  font-size: var(--fs-sm); }
+
+.chat-log {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+}
+
+/* Day separator — a chat's sense of when, without a timestamp per line. */
+.chat-day { text-align: center; margin: var(--space-4) 0 var(--space-2); }
+.chat-day span {
+  color: var(--text-subtle); font-size: var(--fs-xs);
+  background: var(--bg-panel); border: 1px solid var(--border-faint);
+  border-radius: 10px; padding: 2px 10px;
+}
+
+.chat-row { display: flex; gap: var(--space-2); align-items: flex-start; margin-top: 10px; }
+.chat-row.is-grouped { margin-top: 2px; }
+.chat-row.is-mine { flex-direction: row-reverse; }
+
+.chat-avatar {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--bg-page);
+}
+
+.chat-stack { min-width: 0; max-width: 76%; display: flex; flex-direction: column; }
+.chat-row.is-mine .chat-stack { align-items: flex-end; }
+
+.chat-meta {
+  display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap;
+  margin-bottom: 3px; font-size: var(--fs-xs);
+}
+.chat-from   { font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 700; }
+.chat-to     { color: var(--text-subtle); }
+.chat-to--all{ color: var(--accent-purple); }
+.chat-time   { color: var(--text-faint); }
+
+/* The bubble is tinted by its SENDER's hue — the same hue the stream
+   carries in the rail, the Live feed and the graph. */
+.chat-bubble {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-faint);
+  border-left: 2px solid var(--from-color, var(--border-base));
+  border-radius: 10px;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.chat-row.is-mine .chat-bubble {
+  border-left: 1px solid var(--border-faint);
+  border-right: 2px solid var(--from-color, var(--border-base));
+  background: #0f1a14;
+}
+.chat-bubble:hover { border-color: var(--border-base); }
+.chat-bubble .msg-body {
+  color: var(--text-body); font-size: var(--fs-md); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+.msg-clamp { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.chat-more  { color: var(--accent-blue); font-size: var(--fs-xs); margin-top: 4px; }
+.chat-refs  { color: var(--text-subtle); font-size: var(--fs-xs); font-family: var(--font-mono); margin-top: 4px; }
+
+/* Delivery as a read receipt: ✓ sent, ✓✓ actually consumed by a stream. */
+.chat-receipt        { font-size: var(--fs-xxs); margin-top: 3px; }
+.chat-receipt--read  { color: #5a8a5a; }
+.chat-receipt--sent  { color: #806a3a; }
+
+.chat-empty { text-align: center; padding: 48px 24px; }
+.chat-empty-glyph { font-size: 30px; opacity: .5; }
+.chat-empty-title { color: var(--text-heading); font-size: var(--fs-lg); margin-top: var(--space-2); }
+.chat-empty-sub   { color: var(--text-muted); font-size: var(--fs-md); margin: var(--space-2) auto 0; max-width: 46ch; line-height: 1.6; }
+
+.chat-composer {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap; flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-faint);
+  background: var(--bg-panel);
+}
+.chat-to-label { color: var(--text-subtle); font-size: var(--fs-sm); }
+.chat-input {
+  flex: 1; min-width: 160px;
+  background: var(--bg-deep); border: 1px solid var(--border-base);
+  color: var(--text-body); border-radius: 16px;
+  padding: 7px 12px; font-size: var(--fs-md);
+}
+.chat-input:focus { outline: none; border-color: var(--accent-blue); }
+.chat-send-status { color: var(--text-muted); font-size: var(--fs-sm); }
+
+/* The thread header — the open conversation's stream pane sits here. */
+.chat-thread { flex-shrink: 0; padding: 0 var(--space-3); }
+.chat-thread:empty { display: none; }
+
+/* ── The conversation list (the rail) ──────────────────────────────── */
+.streams-rail {
+  width: 300px; flex-shrink: 0; overflow-y: auto;
+  border-right: 1px solid var(--border-faint);
+}
+.conv-section {
+  color: var(--text-subtle); font-size: var(--fs-xxs);
+  text-transform: uppercase; letter-spacing: 0.07em;
+  padding: var(--space-3) var(--space-3) var(--space-1);
+}
+.conv-row {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 7px var(--space-3);
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.conv-row:hover    { background: var(--bg-panel); }
+.conv-row.is-active{ background: var(--bg-raised); border-left-color: var(--accent-blue); }
+.conv-row.is-muted { opacity: .5; }
+
+.conv-avatar {
+  position: relative;
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 700;
+  color: var(--bg-page);
+}
+/* Liveness rides the avatar, the way a presence dot does in any chat app. */
+.conv-light {
+  position: absolute; right: -1px; bottom: -1px;
+  width: 9px; height: 9px;
+  border: 2px solid var(--bg-page); border-radius: 50%;
+}
+
+.conv-main { min-width: 0; flex: 1; }
+.conv-top  { display: flex; align-items: baseline; gap: 6px; }
+.conv-name {
+  font-family: var(--font-mono); font-size: var(--fs-md); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-time { margin-left: auto; flex-shrink: 0; color: var(--text-faint); font-size: var(--fs-xxs); }
+.conv-preview {
+  color: var(--text-muted); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Not a message — identity cues (model · turns · hex) for a stream that hasn't
+   said anything yet. Monospace and dim so it can never be misread as speech. */
+.conv-preview--cues {
+  color: var(--text-subtle); font-family: var(--font-mono); font-size: var(--fs-xs);
+}
+.conv-badge { flex-shrink: 0; align-self: center; }
+
+/* Narrow: the rail stops being a rail and stacks UNDER the chat — the
+   conversation keeps the top of the page either way. */
+@media (max-width: 900px) {
+  .streams-layout { flex-direction: column; }
+  .chat-col { min-height: 55vh; }
+  .streams-rail {
+    width: auto; max-height: 40vh;
+    border-left: none; border-top: 1px solid var(--border-faint);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Thalamus — the brain's standing-intent queue
+   -------------------------------------------------------------------
+   Card colour is the item's KIND (ask / reminder / notice); a settled
+   item dims rather than disappearing, so the queue's history stays
+   readable without competing with what is still open.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.thal-toolbar {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-faint);
+}
+.thal-summary { display: flex; gap: 6px; flex-wrap: wrap; }
+.thal-pill {
+  background: var(--bg-raised); border: 1px solid var(--border-faint);
+  border-radius: 10px; padding: 2px 9px;
+  font-size: var(--fs-sm); color: var(--text-muted);
+}
+.thal-pill b { font-size: var(--fs-md); color: var(--text-heading); }
+.thal-pill--ask b      { color: var(--accent-amber); }
+.thal-pill--reminder b { color: var(--accent-blue); }
+.thal-pill--notice b   { color: var(--accent-cyan); }
+.thal-pill--unseen b   { color: var(--accent-red); }
+.thal-count { color: var(--text-muted); font-size: var(--fs-sm); }
+
+.thal-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-faint);
+  border-left: 3px solid var(--border-base);
+  border-radius: var(--radius-xl);
+  margin: var(--space-2); padding: 9px 12px;
+  cursor: pointer;
+}
+.thal-card:hover { border-color: var(--border-base); }
+.thal-card--ask      { border-left-color: var(--accent-amber); }
+.thal-card--reminder { border-left-color: var(--accent-blue); }
+.thal-card--notice   { border-left-color: var(--accent-cyan); }
+.thal-card:not(.state-open):not(.state-overdue) { opacity: .55; }
+
+.thal-head { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.thal-kind {
+  font-size: var(--fs-xxs); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.thal-kind--ask      { color: var(--accent-amber); }
+.thal-kind--reminder { color: var(--accent-blue); }
+.thal-kind--notice   { color: var(--accent-cyan); }
+.thal-source { color: var(--text-muted); font-size: var(--fs-sm); font-family: var(--font-mono); }
+.thal-state {
+  font-size: var(--fs-xxs); color: var(--text-muted);
+  border: 1px solid var(--border-faint); border-radius: var(--radius-sm); padding: 0 6px;
+}
+.thal-state--open    { color: var(--accent-green); border-color: #1e3a2a; }
+.thal-state--overdue { color: var(--accent-red);   border-color: #3a1e1e; }
+.thal-when { margin-left: auto; color: var(--text-faint); font-size: var(--fs-xs); }
+
+.thal-body {
+  color: var(--text-body); font-size: var(--fs-md); line-height: 1.55;
+  margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+}
+.thal-refs { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+.thal-ref {
+  background: var(--bg-raised); border: 1px solid var(--border-base);
+  border-radius: var(--radius-sm); padding: 1px 6px;
+  font-size: var(--fs-xs); font-family: var(--font-mono);
+  color: var(--accent-blue); cursor: pointer;
+}
+.thal-ref:hover { border-color: var(--accent-blue); }
+
+.thal-answer {
+  margin-top: 6px; padding: 6px 9px;
+  background: #0e1a0e; border: 1px solid #1e3a1e; border-radius: var(--radius-md);
+  color: var(--text-body); font-size: var(--fs-md); line-height: 1.5;
+}
+.thal-answer-label {
+  color: #5a8a5a; font-size: var(--fs-xxs); margin-right: 6px;
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.thal-meta { margin-top: 6px; color: var(--text-subtle); font-size: var(--fs-xs); }
+
+.thal-ledger {
+  margin-top: 6px; padding-top: 5px;
+  border-top: 1px solid var(--border-faint);
+  color: var(--text-muted); font-size: var(--fs-xs);
+}
+.thal-ledger--none { color: #806a3a; }
+.thal-ledger-head {
+  color: var(--text-subtle); font-size: var(--fs-xxs);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px;
+}
+.thal-ledger-row { display: flex; gap: var(--space-2); align-items: baseline; padding: 1px 0; }
+.thal-ledger-who  { color: var(--text-heading); font-family: var(--font-mono); }
+.thal-ledger-via  { color: var(--accent-purple); font-size: var(--fs-xxs); }
+.thal-ledger-when { margin-left: auto; color: var(--text-faint); }
+
+/* ── A stream's OWN chat (identity cue in the thread header) ────────── */
+/* These lines are the operator talking to THAT session — they were never sent
+   to another stream. So they get a transcript language, not the bubble one:
+   no bubble, no sender hue, no receipt. Looking at the two side by side, it
+   must be impossible to mistake one for the other. */
+.own-chat {
+  margin-top: var(--space-2);
+  border: 1px dashed var(--border-base);
+  border-radius: var(--radius-md);
+  background: var(--bg-deep);
+  padding: 6px 9px;
+}
+.own-chat-head {
+  color: var(--text-subtle); font-size: var(--fs-xxs);
+  text-transform: uppercase; letter-spacing: 0.07em;
+  margin-bottom: 4px;
+}
+.own-chat-head span { text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+.own-chat-row {
+  display: flex; gap: 6px; align-items: baseline;
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5;
+}
+.own-chat-who { flex-shrink: 0; font-weight: 600; }
+.own-chat-who--operator { color: var(--accent-green); }
+.own-chat-who--stream   { color: var(--text-subtle); }
+.own-chat-text {
+  color: var(--text-muted); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Drilled open, the lines stop being one-liners — still a transcript. */
+.own-chat.is-open .own-chat-text { white-space: normal; overflow: visible; }
+.own-chat-empty { color: var(--text-faint); font-size: var(--fs-sm); font-style: italic; }

@@ -1,0 +1,94 @@
+.hook-entry { margin: 6px 0; border-radius: 6px; border-left: 3px solid #333; background: #111118; overflow: hidden; }
+.hook-header { padding: 8px 12px; display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.hook-header:hover { background: #1a1a2a; }
+.hook-header .hook-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: bold; text-transform: uppercase; }
+.hook-header .hook-time { color: #555; font-size: 11px; }
+.hook-header .hook-size { color: #444; font-size: 10px; margin-left: auto; }
+.hook-body { display: none; padding: 0 12px 10px; }
+.hook-body.open { display: block; }
+.hook-details-btn { background: #1a1a2a; border: 1px solid #2a2a3a; color: #7eb8ff; padding: 3px 10px; border-radius: 3px; font-size: 10px; cursor: pointer; margin-top: 6px; }
+.hook-details-btn:hover { background: #2a2a4a; }
+.hook-prompt { padding: 6px 12px; background: #0d1117; border-left: 3px solid #58a6ff; color: #c9d1d9; font-size: 12px; margin: 0 8px; font-style: italic; }
+.recall-title { display: inline-block; padding: 2px 8px; background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 3px; font-size: 10px; color: #aaa; cursor: pointer; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recall-title:hover { background: #2a2a4a; color: #ccc; }
+.enc-entry { padding: 8px 12px; margin: 4px 0; background: #111118; border-radius: 6px; border-left: 3px solid #333; font-size: 12px; }
+.enc-entry.created { border-left-color: #33ff88; }
+.enc-entry.revised { border-left-color: #ffaa33; }
+.enc-entry.connected { border-left-color: #aa66ff; }
+.enc-kind { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; text-transform: uppercase; margin-right: 6px; }
+.enc-kind.created { background: #1a3a1a; color: #33ff88; }
+.enc-kind.revised { background: #3a2a1a; color: #ffaa33; }
+.enc-kind.connected { background: #2a1a3a; color: #aa66ff; }
+.enc-title { color: #ccc; font-weight: bold; }
+.explorer { padding: 12px; }
+.search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+.search-bar input { flex: 1; background: #1a1a2a; border: 1px solid #2a2a3a; color: #e0e0e0; padding: 8px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; }
+.search-bar select { background: #1a1a2a; border: 1px solid #2a2a3a; color: #e0e0e0; padding: 8px; border-radius: 4px; font-family: inherit; }
+.node-card { padding: 10px 12px; margin: 4px 0; background: #111118; border-radius: 6px; border-left: 3px solid #333; cursor: pointer; transition: background 0.15s; }
+.node-card:hover { background: #1a1a2a; }
+.node-card .node-title { font-weight: bold; color: #ccc; margin-bottom: 4px; }
+.node-card .node-meta { font-size: 11px; color: #666; display: flex; gap: 12px; }
+.locked-icon { color: #ffaa33; margin-left: 4px; }
+.graph-container { position: relative; height: calc(100vh - 42px); }
+.graph-controls { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 10; display: flex; gap: 6px; align-items: center; }
+.graph-controls button, .graph-controls select { background: #1a1a2acc; border: 1px solid #2a2a3a; color: #ccc; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 11px; backdrop-filter: blur(4px); }
+.graph-controls button:hover { background: #2a2a4a; }
+/* Search input + match-count badge. The input flex-grows so the user can
+ * type long community names without the field clipping. Match-count sits
+ * inline to the right of the input. */
+.graph-search { flex: 1; min-width: 0; background: #1a1a2acc; border: 1px solid #2a2a3a; color: #e0e0e0; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; backdrop-filter: blur(4px); }
+.graph-search:focus { outline: none; border-color: #4a9eff; }
+.graph-search::placeholder { color: #666; }
+.graph-search-count { color: #888; font-size: 10px; min-width: 60px; text-align: right; pointer-events: none; }
+.node-detail { position: fixed; top: 0; right: 0; width: 380px; height: 100%; background: #0d0d15f0; border-left: 1px solid #2a2a3a; padding: 16px; overflow-y: auto; z-index: 100; backdrop-filter: blur(12px); font-size: 12px; }
+.node-detail .nd-close { position: absolute; top: 8px; right: 12px; cursor: pointer; color: #666; font-size: 18px; }
+.node-detail .nd-close:hover { color: #fff; }
+.node-detail .nd-title { font-weight: bold; color: #fff; font-size: 14px; margin-bottom: 8px; padding-right: 24px; }
+.node-detail .nd-meta { color: #666; font-size: 11px; margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.node-detail .nd-content { color: #bbb; white-space: pre-wrap; margin-bottom: 16px; line-height: 1.5; max-height: 300px; overflow-y: auto; border: 1px solid #1a1a2a; border-radius: 4px; padding: 10px; background: #0a0a12; }
+.node-detail .nd-section { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 12px 0 6px; }
+.node-detail .nd-conn { padding: 6px 8px; margin: 3px 0; background: #111118; border-radius: 4px; border-left: 2px solid #333; cursor: pointer; }
+.node-detail .nd-conn:hover { background: #1a1a2a; }
+.node-detail .nd-conn-title { color: #ccc; font-size: 11px; }
+.node-detail .nd-conn-meta { color: #555; font-size: 10px; }
+.node-detail .nd-field { padding: 4px 0; border-bottom: 1px solid #1a1a2a; font-size: 11px; color: #bbb; }
+.node-detail .nd-fk { color: #7eb8ff; font-weight: bold; margin-right: 4px; }
+.health { padding: 12px; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.health-card { background: #111118; border-radius: 8px; padding: 16px; border: 1px solid #1a1a2a; }
+.health-card .hc-value { font-size: 28px; font-weight: bold; }
+.health-card .hc-label { font-size: 11px; color: #666; margin-top: 4px; }
+.health-card.ok .hc-value { color: #33ff88; }
+.health-card.warn .hc-value { color: #ffaa33; }
+.health-card.bad .hc-value { color: #ff6666; }
+
+/* Identity chip — speaker→responder pair from trace metadata. Dim so it's */
+/* present without competing with the primary badges. */
+.identity-chip { color: #88a; font-size: 10px; background: #181828; padding: 1px 6px; border-radius: 3px; border: 1px solid #232338; font-family: inherit; letter-spacing: 0.2px; }
+
+/* ── Stream panes ─────────────────────────────────────────────────────── */
+/* A stream of thought is a live process running in a worktree — so it reads */
+/* as a terminal/window PANE (title bar over a body), not another flat memory */
+/* card. The liveness light pulses when active: alive, not just colored. */
+.stream-pane { border: 1px solid #20212e; border-radius: 9px; margin: 7px 0; overflow: hidden; background: #0b0c12; transition: border-color .15s; }
+.stream-pane.is-active { border-color: #1d3a2a; }
+.stream-pane.is-open { border-color: #2a3550; }
+.stream-pane:hover { border-color: #2e3346; }
+.stream-titlebar { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: #12131d; border-bottom: 1px solid #1c1d28; cursor: pointer; user-select: none; }
+.stream-titlebar:hover { background: #15162130; }
+.stream-handle { color: #e8e8f2; font-size: 13px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stream-handle .glyph { color: #6a6f85; margin-right: 5px; }
+.stream-hex { color: #565b70; font-size: 10px; font-family: ui-monospace, monospace; flex-shrink: 0; }
+.stream-state { font-size: 10px; flex-shrink: 0; white-space: nowrap; }
+.stream-body { padding: 8px 12px; }
+/* liveness light */
+.live-light { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+.live-light.active  { background: #33d17a; box-shadow: 0 0 0 0 #33d17a88; animation: streamPulse 2s infinite; }
+.live-light.dormant { background: #ffaa33; opacity: .8; }
+.live-light.lost    { background: #6a6f85; }
+@keyframes streamPulse {
+  0%   { box-shadow: 0 0 0 0 #33d17a77; }
+  70%  { box-shadow: 0 0 0 6px #33d17a00; }
+  100% { box-shadow: 0 0 0 0 #33d17a00; }
+}
+@media (prefers-reduced-motion: reduce) { .live-light.active { animation: none; } }

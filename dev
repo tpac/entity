@@ -1,0 +1,58 @@
+#!/bin/bash
+# ./dev — run any command under the bundled venv Python.
+#
+# Usage:
+#   ./dev pytest tests/ eval/                   # test suite under 3.11
+#   ./dev python3 tests/bench_vector_cache.py   # benchmark under 3.11
+#   ./dev python3 -c 'import sys; print(sys.version)'
+#   ./dev                                       # drop into a subshell with env primed
+#
+# What it does: sources hooks/scripts/brain-env.sh (same env the daemon
+# and hooks use), which prepends <repo>/venv/bin to PATH and sets
+# $BRAIN_PYTHON. Then execs your command — or spawns a subshell if none.
+#
+# Why: avoids the "tests pass here but daemon runs a different Python"
+# bug. The bundled Python 3.11 is not SIP-protected, so py-spy/lldb can
+# attach; matches the daemon runtime exactly.
+
+set -e
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# Source the same env file the hooks use.
+if [ ! -f "$REPO_ROOT/hooks/scripts/brain-env.sh" ]; then
+    echo "./dev: hooks/scripts/brain-env.sh not found — is this a brain checkout?" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$REPO_ROOT/hooks/scripts/brain-env.sh"
+
+# Confirm the expected Python resolved.
+if [ ! -x "$BRAIN_PYTHON" ]; then
+    echo "./dev: BRAIN_PYTHON ($BRAIN_PYTHON) not executable — run hooks/scripts/ensure-runtime.sh first" >&2
+    exit 1
+fi
+
+# Convenience shortcuts.
+case "${1:-}" in
+    check-overrides)
+        shift
+        exec "$BRAIN_PYTHON" -m tests.interaction_override "$@"
+        ;;
+    check-doc-ids)
+        shift
+        [ -f "$REPO_ROOT/scripts/check_doc_ids.py" ] \
+            || { echo "./dev check-doc-ids: a dev-repo tool — scripts/ is not in this checkout" >&2; exit 1; }
+        exec "$BRAIN_PYTHON" "$REPO_ROOT/scripts/check_doc_ids.py" "$@"
+        ;;
+esac
+
+# No args → interactive subshell with env primed. Exit brings you back.
+if [ $# -eq 0 ]; then
+    echo "[dev] Python: $($BRAIN_PYTHON --version) at $BRAIN_PYTHON"
+    echo "[dev] PATH has $REPO_ROOT/venv/bin prepended. 'exit' to leave."
+    echo "[dev] Shortcuts: ./dev check-overrides · ./dev check-doc-ids"
+    exec "${SHELL:-/bin/bash}"
+fi
+
+exec "$@"

@@ -1,0 +1,307 @@
+/* ==========================================================================
+   Base: reset, document chrome, tabs.
+   The minimum every page needs before any component class kicks in.
+   ========================================================================== */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg-page);
+  color: var(--text-body);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  overflow: hidden;
+  height: 100vh;
+}
+
+canvas { width: 100%; height: 100%; }
+
+/* ── Top-level tabs ──────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-base);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tab {
+  padding: 10px 14px;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  white-space: nowrap;
+  font-size: var(--fs-md);
+}
+.tab:hover { color: var(--text-heading); }
+.tab.active {
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+}
+
+.tab-content {
+  display: none;
+  height: calc(100vh - 42px);
+  overflow: auto;
+}
+.tab-content.active { display: block; }
+
+/* ── ⋯ Overflow tab + dropdown ──────────────────────────────────────── */
+/* The overflow toggle is itself a .tab; it gets `active` styling when one
+ * of its menu items is the current tab. The menu floats absolutely below
+ * the tab bar so it doesn't push other tabs around. */
+/* The scale qualifier on a tab label — "Live S1", "Graph S2". Deliberately
+ * quiet: it disambiguates, it isn't the name. */
+.tab-sub {
+  font-size: var(--fs-xxs);
+  font-family: var(--font-mono);
+  color: var(--text-subtle);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-left: 3px;
+  vertical-align: 1px;
+}
+.tab.active .tab-sub { color: var(--accent-blue); opacity: 0.7; }
+
+.tab-overflow { position: relative; }
+.tab-overflow-toggle {
+  line-height: 1;
+  letter-spacing: 2px;
+}
+.tab-overflow-menu {
+  display: none;
+  /* FIXED, not absolute: `.tabs` above sets `overflow-x: auto`, which makes it
+   * a clipping context for absolutely-positioned descendants. The menu drops
+   * ~105px below a ~36px bar, so every item was clipped away — the ⋯ button
+   * looked dead while working perfectly. Fixed positioning escapes the clip;
+   * app.js sets top/left from the toggle's rect on open. */
+  position: fixed;
+  z-index: 50;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-base);
+  border-top: none;
+  border-bottom-right-radius: var(--radius-md);
+  min-width: 140px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.tab-overflow-menu.open { display: block; }
+.tab-overflow-item {
+  padding: 10px 14px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-faint);
+}
+.tab-overflow-item:last-child { border-bottom: none; }
+.tab-overflow-item:hover { color: var(--text-heading); background: var(--bg-raised); }
+.tab-overflow-item.active { color: var(--accent-blue); }
+
+/* ── Live tab uses flex column so the split fills remaining height ──── */
+/* stats-bar + daemon-banner take their natural height (stats-bar wraps);
+ * .live-split flex-grows into whatever's left. tab-content's default
+ * `display:block`+`overflow:auto` would clamp the split's height — flex
+ * lets the inner panes own their own overflow instead. */
+#tab-live.active {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#tab-live > .stats-bar, #tab-live > #daemon-banner { flex-shrink: 0; }
+
+/* ── Live split: graph | divider | stream ───────────────────────────── */
+/* Grid-based. JS sets grid-template-columns OR -rows + child `order`
+ * based on the active layout (4 modes: graph-left/right/top/bottom).
+ * The divider drag updates the active template at runtime. */
+.live-split {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  position: relative;   /* anchors the absolutely-positioned layout picker */
+}
+.live-pane { overflow: hidden; position: relative; min-width: 0; min-height: 0; }
+.live-pane--graph .graph-container {
+  position: relative;
+  height: 100%;
+}
+.live-pane--stream { overflow-y: auto; }
+.live-divider {
+  background: var(--border-base);
+  cursor: ew-resize;
+  transition: background 0.15s;
+  position: relative;
+}
+.live-split.layout--vertical .live-divider { cursor: ns-resize; }
+.live-divider::before {
+  /* Wider hit-target than the visible line — same trick works for both
+   * axes since the pseudo-element grows in whichever dimension is short. */
+  content: '';
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: -3px;
+  right: -3px;
+}
+.live-divider:hover, .live-divider.dragging { background: var(--accent-blue); }
+.live-split.dragging { user-select: none; }
+.live-split.layout--horizontal.dragging { cursor: ew-resize; }
+.live-split.layout--vertical.dragging   { cursor: ns-resize; }
+
+/* Child order — flipped by JS when the active layout puts graph last
+ * (graph-right / graph-bottom). Grid respects `order` exactly like flex. */
+.live-split.graph-first .live-pane--graph  { order: 0; }
+.live-split.graph-first .live-divider      { order: 1; }
+.live-split.graph-first .live-pane--stream { order: 2; }
+.live-split.graph-last  .live-pane--stream { order: 0; }
+.live-split.graph-last  .live-divider      { order: 1; }
+.live-split.graph-last  .live-pane--graph  { order: 2; }
+
+/* ── Graph hidden state ──────────────────────────────────────────────
+ * Default-off below GRAPH_AUTOLOAD_MIN_WIDTH (live.js). When the dashboard
+ * is embedded in a narrow pane (e.g. viewed inside Claude) the WebGL graph
+ * is never mounted, so its continuous 60fps render loop can't compete with
+ * the host for the GPU. Graph pane + divider collapse; the activity stream
+ * takes the full width. Toggle via the toolbar button (choice persists). */
+.live-split.graph-hidden .live-pane--graph,
+.live-split.graph-hidden .live-divider { display: none; }
+.live-split.graph-hidden {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+}
+
+/* ── Layout picker (4 orientation buttons) ──────────────────────────
+ * Lives in .live-toolbar, a strip above .live-split, inline so it never
+ * covers the stream pane's content. */
+.live-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 4px 8px 0 8px;
+  gap: 8px;
+}
+.live-layout-picker {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-base);
+  border-radius: var(--radius-md);
+  padding: 2px;
+}
+.live-layout-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0;
+  line-height: 1;
+  font-family: inherit;
+}
+.live-layout-btn:hover { background: var(--bg-raised); color: var(--text-heading); }
+.live-layout-btn.active { background: var(--bg-raised); color: var(--accent-blue); }
+
+/* Graph show/hide toggle — wider than the glyph pickers (carries a text
+ * label) so it reads as the explicit "is the GPU-heavy graph mounted?"
+ * control. `.active` = graph currently mounted. */
+.live-graph-toggle {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-base);
+  color: var(--text-muted);
+  font-size: 11px;
+  height: 22px;
+  padding: 0 8px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  line-height: 1;
+  font-family: inherit;
+}
+.live-graph-toggle:hover { background: var(--bg-raised); color: var(--text-heading); }
+.live-graph-toggle.active { color: var(--accent-blue); }
+
+/* ── Top stats bar ──────────────────────────────────────────────────── */
+
+.stats-bar {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-faint);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.stat { display: flex; flex-direction: column; align-items: center; min-width: 70px; }
+.stat-value { font-size: var(--fs-xl); font-weight: bold; color: var(--accent-blue); }
+.stat-label {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.daemon-status {
+  margin-left: auto;
+  padding: var(--space-1) 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: bold;
+}
+.daemon-status.alive       { background: #1a3a1a; color: var(--accent-green); }
+.daemon-status.unavailable { background: #3a1a1a; color: var(--accent-red); }
+
+.no-daemon-banner {
+  background: #3a1a1a;
+  border: 1px solid var(--accent-red);
+  color: #ff9999;
+  padding: 10px var(--space-4);
+  font-size: var(--fs-md);
+  text-align: center;
+}
+
+/* ── Filter / toggle row above feeds ────────────────────────────────── */
+
+.feed { padding: var(--space-2); }
+
+.feed-toggle {
+  display: flex;
+  gap: 0;
+  padding: 0 var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.feed-btn {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-base);
+  color: var(--text-muted);
+  padding: calc(var(--space-1) + 2px) var(--space-4);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  transition: all 0.15s;
+}
+.feed-btn:first-child { border-radius: var(--radius-md) 0 0 var(--radius-md); }
+.feed-btn:last-child  { border-radius: 0 var(--radius-md) var(--radius-md) 0; border-left: none; }
+.feed-btn.active {
+  background: var(--bg-raised);
+  color: var(--accent-blue);
+  border-color: var(--border-strong);
+}
+
+/* Compact form controls used in toolbars (filter dropdowns, hour selects). */
+.toolbar-select {
+  background: #111;
+  color: var(--text-heading);
+  border: 1px solid #333;
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+}

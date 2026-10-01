@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.brain.dashboard</string>
+
+	<!-- Brain dashboard launchd service. In the repo this file is a TEMPLATE
+	     whose paths are per-machine placeholders; ensure-dashboard.sh substitutes
+	     them and installs the live copy at
+	     ~/Library/LaunchAgents/com.brain.dashboard.plist (don't hand-load the repo
+	     template — its placeholder paths won't resolve). See
+	     docs/LIFECYCLE-LAUNCH-ARCH-PLAN.md Step 2.
+
+	     Launches hooks/scripts/brain-dashboard — the single dashboard launcher
+	     (also used by the /dashboard skill); it sources brain-env.sh +
+	     resolve-brain-db.sh and execs the venv Python. Not in a top-level bin/:
+	     claude.ai-hosted plugins may not ship bin/ executables.
+
+	     Port: not pinned here. dashboard/server.py defaults to 47303; override via
+	     DASHBOARD_PORT in ~/.config/brain/env (the single user-editable place,
+	     sourced by brain-env.sh on every launch path).
+
+	     KeepAlive => one always-on GLOBAL SINGLETON, shared by every Claude Code
+	     session. Open it at http://localhost:47303. NOT a per-chat preview server —
+	     don't add it back to .claude/launch.json. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PLUGIN_DIR__/hooks/scripts/brain-dashboard</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>BRAIN_DB_DIR</key>
+		<string>__BRAIN_DB_DIR__</string>
+	</dict>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>__BRAIN_DB_DIR__/dashboard.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>__BRAIN_DB_DIR__/dashboard.log</string>
+
+	<key>WorkingDirectory</key>
+	<string>__PLUGIN_DIR__</string>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

@@ -1,0 +1,65 @@
+/* ==========================================================================
+   Node type colors — the single source for type→color in the dashboard.
+   --------------------------------------------------------------------------
+   .type-badge is the badge wrapper and carries the muted default, so a type
+   with no rule below still renders as a quiet pill; .type--<name> sets its
+   colors. Combine: <span class="type-badge type--lesson">lesson</span>
+   ========================================================================== */
+
+.type-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: bold;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+}
+
+/* Lesson / insight family — derived knowledge */
+.type--lesson       { background: #1a2a4a; color: var(--accent-blue); }
+.type--insight      { background: #1a2a4a; color: #88ddff; }
+.type--finding      { background: #1a2a4a; color: #88ddff; }
+.type--decision     { background: #3a1a4a; color: var(--accent-purple); }
+.type--mental_model { background: #1a3a3a; color: #33dddd; }
+.type--mechanism    { background: #3a3a1a; color: #dddd33; }
+.type--pattern      { background: #4a1a3a; color: var(--accent-pink); }
+.type--architecture { background: #1a3a3a; color: #33dddd; }
+.type--concept      { background: #1a2a3a; color: var(--accent-blue); }
+.type--design       { background: #2a3a1a; color: #aadd33; }
+.type--fact         { background: #2a2a2a; color: var(--text-heading); }
+
+/* Identity-bearing — locked, axiomatic */
+.type--principle    { background: #4a3a1a; color: var(--accent-amber); }
+.type--rule         { background: #4a3a1a; color: var(--accent-amber); }
+.type--identity     { background: #4a3a1a; color: var(--accent-amber); }
+.type--vision       { background: #4a3a1a; color: #ffcc44; }
+.type--directive    { background: #4a3a1a; color: var(--accent-amber); }
+
+/* Episodic — moments and events */
+.type--moment       { background: #2a1a3a; color: var(--accent-purple); }
+.type--event        { background: #2a1a3a; color: var(--accent-purple); }
+.type--interaction  { background: #1a4a2a; color: var(--accent-green); }
+.type--context      { background: #2a2a2a; color: var(--text-muted); }
+.type--episode      { background: #2a1a3a; color: var(--accent-purple); }
+
+/* Correction / divergence */
+.type--correction   { background: #4a1a1a; color: var(--accent-red); }
+.type--bug          { background: #4a1a1a; color: #ff8866; }
+.type--bug_lesson   { background: #4a1a1a; color: #ff8866; }
+.type--tension      { background: #4a1a1a; color: #ff4444; }
+
+/* Open / unresolved */
+.type--open         { background: #2a2a3a; color: #aaaaff; }
+.type--uncertainty  { background: #2a2a3a; color: #aaaaff; }
+.type--question     { background: #2a2a3a; color: #aaaaff; }
+.type--constraint   { background: #3a2a1a; color: #ff8833; }
+.type--impact       { background: #3a2a1a; color: #ff6644; }
+.type--convention   { background: #2a2a3a; color: #66aaff; }
+
+/* Communities and aggregates */
+.type--community    { background: #2a2a2a; color: #fff; }
+
+/* Vocabulary / housekeeping */
+.type--vocabulary   { background: #2a2a2a; color: var(--text-muted); }
+.type--reflection   { background: #3a1a3a; color: #ff99cc; }

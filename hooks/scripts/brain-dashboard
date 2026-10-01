@@ -1,0 +1,31 @@
+#!/bin/bash
+# brain-dashboard — launches the read-only brain dashboard (http://127.0.0.1:47303).
+#
+# Lives in hooks/scripts/ — NOT a top-level bin/: claude.ai-hosted plugins may
+# not ship bin/ executables (PATH-injected but invisible on the admin approval
+# surface). Invoked by absolute path: the launchd plist + ensure-dashboard.sh
+# use $PLUGIN_DIR/hooks/scripts/brain-dashboard; from a terminal, source
+# ~/.config/brain/resolved.env and run "$PLUGIN_ROOT/hooks/scripts/brain-dashboard".
+# The dashboard is a standalone threaded HTTP server bound to 127.0.0.1; it
+# reads live data via the daemon TCP socket (uid-derived port) and falls back
+# to read-only SQLite when the daemon is down. Override the port with DASHBOARD_PORT.
+#
+# Usage: hooks/scripts/brain-dashboard
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# brain-env.sh (sibling) sets $BRAIN_PYTHON + $PLUGIN_DIR and bootstraps the runtime.
+# 1>&2: keep bootstrap chatter off the dashboard's stdout.
+source "$SCRIPT_DIR/brain-env.sh" 1>&2
+# Fail fast with a clear error if the venv Python is missing — under launchd
+# (com.brain.dashboard) this avoids a confusing 10s KeepAlive respawn loop.
+if [ ! -x "${BRAIN_PYTHON:-}" ]; then
+    echo "[brain-dashboard] FATAL: venv python not executable at ${BRAIN_PYTHON:-<unset>}" >&2
+    echo "[brain-dashboard] Run: $SCRIPT_DIR/ensure-runtime.sh" >&2
+    exit 1
+fi
+# resolve-brain-db.sh exports BRAIN_DB_DIR for the dashboard's read-only SQLite
+# fallback (incl. the $CLAUDE_PLUGIN_DATA standard location). Best-effort —
+# never block the launch; live data still comes via the daemon socket.
+source "$SCRIPT_DIR/resolve-brain-db.sh" 1>&2 || true
+# Role-named interpreter: the process reads `Entity-dash` (brain_python_as).
+exec "${BRAIN_PYTHON_DASH:-$BRAIN_PYTHON}" "$PLUGIN_DIR/dashboard/brain_dashboard_standalone.py" "$@"

@@ -1,0 +1,1361 @@
+{
+  "_schema": {
+    "_about": "This file IS the aspect taxonomy — the single source of truth for the semantic roles that group the brain's open-text node types and edge relations. An aspect answers: what JOB does this kind of node/edge do? (carry identity, record a correction, mark graph plumbing, ...). Code never hardcodes these groupings; it reads them from here via brain.aspects (AspectRegistry, servers/aspects.py). Keys starting with '_' are documentation like this block — the loader, validator, write door, and dashboard all skip them.",
+    "_editing": "Adding an aspect = add a full entry here (all fields below, including the four facts) + one name in REQUIRED_ASPECTS (servers/aspect_store.py). Contract tests refuse a half-landed entry. Member lists are the classifier's territory — hand-edit them only as a deliberate curation fix; every runtime write goes through AspectRegistry's door, which validates and refuses structural violations (e.g. a string in noise AND a semantic aspect).",
+    "meaning": "The SPEC: what belongs in this aspect, written for the S2 classifier (Sonnet) that routes new strings here by reading exactly this text. Quality matters — the classifier reasons from the meaning, not from similarity to existing members. Also embedded for recall scoring.",
+    "node_types": "WORK PRODUCT, not spec: the node-type strings the classifier (and the seed curation) has filed under this aspect so far. Grows as the encoder invents new types. A string may live in several aspects (multi-membership); the FIRST aspect to claim it in file order is its primary for reverse lookups. A member may also be an object {\"type\": \"decision\", ...} once MEMBER_FIELDS declares a node-type field; none is declared today.",
+    "edge_relations": "Same as node_types but for edge relation verbs (corrects, extends, depends_on, ...). Multi-membership and first-claimant-order apply identically. A member is a bare string or an object {\"verb\": \"corrects\", \"orientation\": \"source_actor\"} carrying the verb plus the fields MEMBER_FIELDS (servers/aspect_store.py) declares for edge_relations — today `orientation` in {source_actor, target_actor, symmetric}: which node does the work the verb names; and, on correction_improvement members only, `flavor` in {replaced, corrected, resolved, reframed, unchanged}: what the verb did to the claim of the node it acts on. A bare string is a member with no facts yet; the S2 classifier fills orientation, while flavor is curated by hand here and never filled by the classifier. A verb listed in several aspects carries one value per field across all of them; the validator refuses disagreement.",
+    "dimension": "Which axis of grouping this aspect lives on. Only 'semantic' exists today; the field is the hook for future axes (e.g. temporal).",
+    "locked": "True for the required aspects code routes on by name — maintenance must never remove or rename them. Emergent (classifier-discovered) aspects would ship unlocked.",
+    "metadata": "Free-form per-aspect extras. Today: display_label, the human-readable name the Healer shows in prompts.",
+    "accepts": "FACT: which member categories this aspect is defined over — ['node_types'], ['edge_relations'], or both. Design intent, not derivable from current members (an empty list might mean 'edge-only by design' or 'not yet populated'). The classifier's validation drops a routing whose category the aspect does not accept.",
+    "routable": "FACT: may the S2 classifier route new strings here? false = system-owned membership (survivor_lineage: its absorbed_into edges are written by the absorb op, never classified). Non-routable aspects are left out of the classifier's menu AND rejected by its validation.",
+    "prompt_visible": "FACT: does this aspect's edge vocabulary appear in encoder prompts (the 'Edge Aspects' block that steers S1/S2 encoders toward specific verbs)? false for the catch-alls (noise, generic_relation) and system aspects — offering 'related_to' or 'co_anchored' as vocabulary would invite exactly the writes we filter out."
+  },
+  "identity_bearing": {
+    "node_types": [
+      "principle",
+      "identity",
+      "vision",
+      "rule",
+      "operator",
+      "capability",
+      "directive",
+      "design_principle",
+      "procedure",
+      "philosophy",
+      "framework",
+      "definition",
+      "preference",
+      "craft_rule"
+    ],
+    "edge_relations": [],
+    "meaning": "Locked, axiomatic statements that DEFINE how the partnership operates — values, principles, identity claims, non-negotiable rules, declared visions. The brain treats these as foundational. NOT: things we've LEARNED that happen to feel important (those go to lesson_insight). Test: would this still hold if all our experience were erased? If yes → identity_bearing. If it EARNED its standing through doing the work → lesson_insight.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {}
+  },
+  "episodic_anchor": {
+    "node_types": [
+      "moment",
+      "anchor_quote",
+      "user_quote",
+      "quote",
+      "catalyst",
+      "milestone",
+      "event",
+      "interaction",
+      "context",
+      "incident",
+      "corridor",
+      "benchmark",
+      "state",
+      "resolution",
+      "outcome",
+      "episode",
+      "time_anchor",
+      "personal_context",
+      "profile",
+      "person",
+      "interest",
+      "case",
+      "journal"
+    ],
+    "edge_relations": [],
+    "meaning": "Specific moments, quoted phrases, named events, inflection points — knowledge bound to a particular point in time and shaped what came after. The thing happened; the node captures the happening itself. NOT: lessons extracted from those moments (lesson_insight) or events still unfolding (active_thread). Test: is this primarily a TIMESTAMP-bound record of something that occurred? If yes → episodic_anchor.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {}
+  },
+  "active_thread": {
+    "node_types": [
+      "open",
+      "tension",
+      "hypothesis",
+      "aspiration",
+      "uncertainty",
+      "gap",
+      "task",
+      "status",
+      "product-requirement",
+      "problem",
+      "requirement",
+      "plan",
+      "performance",
+      "goal",
+      "feature-requirement",
+      "risk",
+      "backlog"
+    ],
+    "edge_relations": [],
+    "meaning": "Unresolved threads — work-in-progress, open questions, identified gaps, untested hypotheses, directional goals, things still being worked through. Signals 'currently active' to consumers asking what's not yet closed. NOT: things that are CLOSED and now teach us (lesson_insight) or foundational values (identity_bearing). Test: is this still OPEN? If yes → active_thread.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {}
+  },
+  "lesson_insight": {
+    "node_types": [
+      "lesson",
+      "insight",
+      "validation",
+      "meta_learning",
+      "reflection",
+      "decision",
+      "fact",
+      "finding",
+      "mechanism",
+      "architecture",
+      "bug",
+      "concept",
+      "design",
+      "pattern",
+      "mental_model",
+      "fn_reasoning",
+      "analysis",
+      "constraint",
+      "research",
+      "diagnosis",
+      "convention",
+      "impact",
+      "code_concept",
+      "reframe",
+      "reference",
+      "research-finding",
+      "param_influence",
+      "observation",
+      "artifact",
+      "fix",
+      "discovery",
+      "arch_constraint",
+      "resolution",
+      "method",
+      "landscape",
+      "clarification",
+      "audit",
+      "recommendation_set",
+      "resource_list",
+      "case",
+      "knowledge",
+      "reference_cluster",
+      "technique",
+      "reference_list",
+      "overview"
+    ],
+    "edge_relations": [],
+    "meaning": "Reusable knowledge derived from experience — decisions, findings, lessons, insights, validations, mental models, mechanisms, patterns. The brain LEARNED these from specific situations and they're now usable across contexts. NOT: declared values that didn't have to be earned (identity_bearing) or moments themselves (episodic_anchor). Test: was this EARNED through doing the work? If yes → lesson_insight.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {}
+  },
+  "generic_relation": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "related_to",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "related",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "same_root_cause",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "co_occurred_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "co_shipped_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "has_impact",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "synthesizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "summarizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "similar_to",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "complements",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "connects_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "companion_to",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "parallels",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "connects",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "mirrors",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "concerns",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "coexists_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "same_domain_as",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "shares_pattern_with",
+        "orientation": "symmetric"
+      },
+      "relevant_to"
+    ],
+    "meaning": "Edges with REAL but VAGUE semantic content — 'X is related to Y' where there's a genuine connection but no specific role to claim. Catch-all for legitimate associations that don't fit a more specific aspect. NOT: graph mechanics with no semantic claim (those go to noise). Test: is there ANY semantic intent here? If yes but unspecific → generic_relation. If no semantic claim, just structural/system-derived → noise.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": false,
+    "metadata": {}
+  },
+  "noise": {
+    "node_types": [
+      "community",
+      "aspect",
+      "intuition",
+      "thought",
+      "purpose",
+      "file",
+      "vocabulary",
+      "test",
+      "project"
+    ],
+    "edge_relations": [
+      "dreamed_from",
+      "dream_observation",
+      "co_anchored",
+      "community_member"
+    ],
+    "meaning": "Strings without semantic claim — graph mechanics (co_anchored), bookkeeping types (community, aspect, file, project, test, vocabulary), system artifacts. Generated by the brain's machinery, not by knowledge. NOT: vague semantic links (those have meaning, however weak — generic_relation). Test: is this a SYSTEM ARTIFACT or a BOOKKEEPING TYPE that exists for storage/lookup, not for knowledge? If yes → noise.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types",
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": false,
+    "metadata": {}
+  },
+  "correction_improvement": {
+    "node_types": [
+      "correction",
+      "bug_lesson",
+      "bug",
+      "reframe",
+      "fix"
+    ],
+    "edge_relations": [
+      {
+        "verb": "corrects",
+        "orientation": "source_actor",
+        "flavor": "corrected"
+      },
+      {
+        "verb": "corrected_by",
+        "orientation": "target_actor",
+        "flavor": "corrected"
+      },
+      {
+        "verb": "addressed_by",
+        "orientation": "target_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "improves",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "reframes",
+        "orientation": "source_actor",
+        "flavor": "reframed"
+      },
+      {
+        "verb": "protects",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "resolves_constraint",
+        "orientation": "source_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "restates",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "preferred_over",
+        "orientation": "source_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "resolves",
+        "orientation": "source_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "partially_resolves",
+        "orientation": "source_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "addresses",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "consolidated_into",
+        "orientation": "target_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "updates",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "resolved_by",
+        "orientation": "target_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "modifies",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "prevents",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "revises",
+        "orientation": "source_actor",
+        "flavor": "reframed"
+      },
+      {
+        "verb": "changes",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "could_replace",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "fixes",
+        "orientation": "source_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "redefines",
+        "orientation": "source_actor",
+        "flavor": "reframed"
+      },
+      {
+        "verb": "rejected_for",
+        "orientation": "target_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "overrides",
+        "orientation": "source_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "absorbed_into",
+        "orientation": "target_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "supersedes",
+        "orientation": "source_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "superseded_by",
+        "orientation": "target_actor",
+        "flavor": "replaced"
+      },
+      {
+        "verb": "amends",
+        "orientation": "source_actor",
+        "flavor": "corrected"
+      },
+      {
+        "verb": "implements_fix_for",
+        "orientation": "source_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "fixed_by",
+        "orientation": "target_actor",
+        "flavor": "resolved"
+      },
+      {
+        "verb": "preserves",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      },
+      {
+        "verb": "hardens",
+        "orientation": "source_actor",
+        "flavor": "unchanged"
+      }
+    ],
+    "meaning": "Knowledge or edges that explicitly UPDATE / AMEND / FIX / REPLACE prior knowledge — there's a target being corrected. Node types that ARE corrections; edges where one node fixes, replaces, or improves another (`corrects`, `supersedes`, `reframes`, `fixes`, `resolves`). `supersedes` / `superseded_by` are multi-homed HERE and in hierarchical_structure — a replacement both corrects what came before and states what stands now; list both, never pick one. NOT: extensions that elaborate without amending (extension_refinement). Test: does this REPLACE or FIX something that was wrong or outdated? If yes → correction. If it just BUILDS ON without amending → extension.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types",
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "corrects/improves"
+    }
+  },
+  "extension_refinement": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "extends",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "refines",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "elaborates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "expands",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "evolves",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "evolves_into",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "derived_from",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "influenced",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "implementation_attempt_for",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "implements_tradeoff_against",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "implements",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "contextualizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "applies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "instantiates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "formalizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "operationalizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "builds_on",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "clarifies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "evolved_from",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "specializes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "specifies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "advances",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "deepens",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "modeled_on",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "evolves_from",
+        "orientation": "target_actor"
+      }
+    ],
+    "meaning": "Edges where one node makes another MORE specific, detailed, elaborated, or developed — without correcting it. The target gets richer, not changed. NOT: corrections that amend (correction_improvement) or causation that explains why (explanation_causation). Test: is the target NOW WRONG because of this edge? If yes → correction. If just MORE DETAILED / EVOLVED → extension.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "extends/refines"
+    }
+  },
+  "explanation_causation": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "explains",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "caused_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "explains_why",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "justifies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "motivates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "grounds",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "contributes_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "motivated",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "motivated_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "caused_during",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "causes",
+        "orientation": "source_actor"
+      },
+      "necessitated",
+      "provides_root_cause_for",
+      {
+        "verb": "produces",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "produced",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "informs",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "triggers",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "defines",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "produced_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "informed_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "grounded_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "triggered",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "answers",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "makes_critical",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "affects_interpretation_of",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "identifies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "traced",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "diagnoses",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "distinguishes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "manifests_in",
+        "orientation": "source_actor"
+      }
+    ],
+    "meaning": "Edges that answer WHY — one node provides the cause, reason, root, motivation, or justification of another. The relationship is REASONING-level, not temporal or structural. NOT: 'X happens after Y' (temporal_sequence) or 'X needs Y to exist' (dependency_flow). Test: can you read it as 'because of X, Y'? If yes → explanation. If only the time-order matters → temporal. If only existence/correctness depends → dependency.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "explains/causes"
+    }
+  },
+  "dependency_flow": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "depends_on",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "prerequisite_for",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "enables",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "requires",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "blocks",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "constrains",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "required_for",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "requires_understanding_of",
+        "orientation": "source_actor"
+      },
+      "requires_followup",
+      "should_feed_into",
+      {
+        "verb": "should_use_instead",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "configures",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "affects",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "enabled_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "enforces",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "uses",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "guides",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "operates_on",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "constrained_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "serves",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "targets",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "utilizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "flows_through",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "requires_changes_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "applies_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "foundation_for",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "prioritizes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "context_for",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "must_validate_against",
+        "orientation": "target_actor"
+      }
+    ],
+    "meaning": "Edges expressing structural PREREQUISITE — X depends on / requires / enables / blocks Y for existence or correctness. About NEED, not about WHY (explanation) or TIME (temporal). NOT: 'X causes Y' (explanation) or 'X happens before Y in time' (temporal). Test: does removing X break Y? If yes → dependency. If X just precedes Y temporally without making Y impossible → temporal. If X explains why Y is the way it is → explanation.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "depends on/enables"
+    }
+  },
+  "contradiction_conflict": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "contradicts",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "violates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "challenges",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "contrasts",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "contrasts_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "distorts",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "masked_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "undermines",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "violates_when_unfixed",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "risks",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "identifies_gap_in",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "weakens",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "questions",
+        "orientation": "source_actor"
+      }
+    ],
+    "meaning": "Edges where one node OPPOSES another — contradicts, challenges, undermines, violates, distorts. Productive tension between opposing claims that CO-EXIST in disagreement. NOT: corrections that amend / replace (those are correction_improvement). Test: do these two CO-EXIST in tension, or does one REPLACE the other? Co-exist in tension → contradiction. Replace → correction.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "contradicts/challenges"
+    }
+  },
+  "validation_evidence": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "validates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "confirms",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "demonstrates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "evidences",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "supports",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "proves",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "exemplifies",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "strengthens",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "validated_by",
+        "orientation": "target_actor"
+      },
+      "adds_evidence_for",
+      {
+        "verb": "reinforces",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "tests",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "measures",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "fulfills",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "tested_against",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "aligns_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "consistent_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "measures_against",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "enacts",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "respects",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "describes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "example_of",
+        "orientation": "source_actor"
+      }
+    ],
+    "meaning": "Edges where one node SUPPORTS / CONFIRMS / TESTS / DEMONSTRATES another — provides empirical or logical evidence for a claim, hypothesis, design. NOT: explanation (which gives the WHY, not evidence). Test: is this OBSERVATION / MEASUREMENT / TEST / EXAMPLE evidence? If yes → validation. If reasoning-level WHY → explanation.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "validates/demonstrates"
+    }
+  },
+  "hierarchical_structure": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "part_of",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "includes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "contains",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "supersedes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "superseded_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "section_of",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "centers_on",
+        "orientation": "source_actor"
+      },
+      "crowns",
+      {
+        "verb": "abstracts",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "consolidated_into",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "refers_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "documented_in",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "follows_pattern_of",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "resolved_item_in",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "operates_within",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "fits_into",
+        "orientation": "source_actor"
+      }
+    ],
+    "meaning": "Edges expressing CONTAINMENT or SUPERSESSION — part_of, includes, contains, supersedes. Skeleton of what contains what and what replaces what. `supersedes` / `superseded_by` are multi-homed HERE and in correction_improvement (a replacement is also a correction of the replaced) — list both, never pick one. NOT: dependency (X needs Y to exist, not contain Y) or extension (refining vs containing). Test: is X a STRUCTURAL PIECE of Y, or does Y CONTAIN X? If yes → hierarchical. If X just RELIES on Y → dependency.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "part of/supersedes"
+    }
+  },
+  "temporal_sequence": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "follows_from",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "leads_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "triggered_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "follows",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "continues",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "concluded_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "resulted_from",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "revealed",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "interrupted",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "emerged_from",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "evolved_into",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "followed",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "led_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "recovered_from",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "shipped_with",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "opens",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "triggers",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "completes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "updates",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "after",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "anchored_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "completed_during",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "resolved_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "before",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "reveals",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "evolved_from",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "revises",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "triggered",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "closes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "discovered_alongside",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "rejected_for",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "responds_to",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "revealed_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "precedes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "surfaced",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "diagnosed_during",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "surfaced_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "during",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "evolves_from",
+        "orientation": "target_actor"
+      },
+      "meets",
+      {
+        "verb": "concludes",
+        "orientation": "source_actor"
+      }
+    ],
+    "meaning": "PURE CHRONOLOGICAL edges — X happens at T1, Y at T2, T1<T2. Time-order only, no reasoning or dependency claim. NOT: 'X causes Y' (even if causal-sequential, classify as explanation_causation when reasoning matters) and not dependency. Test: if you remove the TIME aspect, does the edge still mean something? If only the time-order matters → temporal. If REASONING matters → explanation. If EXISTENCE depends → dependency.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {
+      "display_label": "follows from/leads to"
+    }
+  },
+  "survivor_lineage": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "absorbed_into",
+        "orientation": "target_actor"
+      }
+    ],
+    "meaning": "Edges recording where an archived node's knowledge SURVIVED — the source node was absorbed/merged into the living target that now carries it forward. The redirect from a dead node to its living descendant; resolve_live walks it to return the living form for any history-sourced id. By construction the source is archived (and in a chain A→B→C the target is too), so these edges intentionally span archived→archived/live and are EXEMPT from dangling-edge archival — archiving them would sever the redirect. NOT: supersession between live nodes (hierarchical_structure) or amendment of a claim (correction_improvement); absorbed_into is multi-homed in correction_improvement for the correction walk and here for the lineage/redirect role.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": false,
+    "prompt_visible": false,
+    "metadata": {
+      "display_label": "absorbed into"
+    }
+  },
+  "wisdom": {
+    "node_types": [
+      "insight",
+      "lesson",
+      "principle",
+      "vision",
+      "reflection",
+      "meta_learning",
+      "philosophy",
+      "design_principle",
+      "framework",
+      "pattern",
+      "mental_model",
+      "craft_rule"
+    ],
+    "edge_relations": [],
+    "meaning": "Earned understanding that shapes how I think — the generative insights, lessons, principles, and visions that define the partnership's way of reasoning. The inspiring, high-influence subset surfaced as my wisdom layer (boot + recall, focus-adaptive — relevance-ranked to the session arc when present, influence-sampled at boot). Multi-membership: these types also belong to lesson_insight (earned through doing the work) or identity_bearing (axiomatic); wisdom marks the ones that are GENERATIVE — re-encountering them shifts how I think, not just what I know. NOT operational rules (identity_bearing's rule/operator/procedure), NOT tactical record-keeping (lesson_insight's decision/fact/finding/mechanism/bug). Test: would running into this again change my frame of mind, not just add a fact? If yes → wisdom.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "node_types"
+    ],
+    "routable": true,
+    "prompt_visible": true,
+    "metadata": {}
+  },
+  "settlement": {
+    "node_types": [],
+    "edge_relations": [
+      {
+        "verb": "similar_to",
+        "orientation": "symmetric"
+      },
+      {
+        "verb": "consolidated_into",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "corrects",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "corrected_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "supersedes",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "superseded_by",
+        "orientation": "target_actor"
+      },
+      {
+        "verb": "resolves",
+        "orientation": "source_actor"
+      },
+      {
+        "verb": "resolved_by",
+        "orientation": "target_actor"
+      }
+    ],
+    "meaning": "Edges meaning this PAIR is already settled against each other — a consolidation decision was made (similar_to = reviewed and kept, consolidated_into = merged) or one endpoint resolved/replaced the other (corrects, supersedes, resolves, plus inverse forms since stored orientation is advisory). The consolidation decoder derives its suppression set from this list: a node touched by any settlement edge counts as reviewed, and reviewed↔reviewed pairs are never re-proposed. CLOSED LIST (routable: false): membership changes are deliberate human edits, never classifier growth — a verb wrongly added here silently exempts pairs from review forever. NOT the broad correction_improvement family (restates/improves/changes/addresses do not settle a pair), NOT tensions (contradiction_conflict pairs are kept, never merged). Every verb here is multi-homed: its semantic home stays in its own aspect; settlement marks the suppression ROLE.",
+    "dimension": "semantic",
+    "locked": true,
+    "accepts": [
+      "edge_relations"
+    ],
+    "routable": false,
+    "prompt_visible": false,
+    "metadata": {
+      "display_label": "settled pair"
+    }
+  }
+}

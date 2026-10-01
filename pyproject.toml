@@ -1,0 +1,62 @@
+# The brain's external versions, in one place.
+#
+# [project.dependencies] states what the code needs; uv.lock (generated, never
+# hand-edited) records the exact versions every install syncs to — the plugin,
+# the Codex copy, the main checkout the daemon runs from, every worktree, every
+# eval arm (hooks/scripts/ensure-runtime.sh). `uv lock --upgrade` moves them all
+# to latest at once; a lock change is then an ordinary diff that ships through
+# main and converges each install on its next bootstrap.
+#
+# [tool.brain.embedder] pins the embedding model artifact (servers/embedder.py
+# reads it). Unlike the libraries this does NOT float: stored vectors belong to
+# the artifact that produced them, so a change here is a deliberate migration.
+
+[project]
+name = "entity"
+version = "0.0.0"  # placeholder uv requires; the release version lives in .claude-plugin/plugin.json
+requires-python = ">=3.11"
+dependencies = [
+    "fastembed>=0.8",
+    # Capped below 1.30: on the pinned int8 nomic model, 1.30.0 computes
+    # different vectors for the same text (cosine 0.963 worst, 0.979 mean
+    # against 1.24-1.29; neither is closer to the full-precision model), so
+    # new queries would drift from every stored vector. 1.24.4 through 1.29.0
+    # are bit-identical (measured 2026-09-23). Lifting the cap is an embedder
+    # migration (re-embed the corpus), not a routine bump —
+    # tests/test_runtime_pins.py holds the line.
+    "onnxruntime>=1.24,<1.30",
+    # 1.x is a major version with a documented breaking-change list — it moves
+    # in its own step, not as part of a routine lock bump.
+    "anthropic>=0.86,<1.0",
+    "numpy>=1.24",
+    "sqlite-vec>=0.1",
+    # Date-expression parsing in the recall fetch tools. Its imports are wrapped
+    # in try/except, so a missing install silently disables date filters instead
+    # of failing — declare it, never rely on a transitive.
+    "python-dateutil>=2.8",
+    # OS trust store for TLS: corporate proxy CAs live in the system keychain,
+    # not certifi's bundle; without it every HTTPS call on a TLS-intercepting
+    # network dies UnknownIssuer.
+    "truststore>=0.10",
+]
+
+[dependency-groups]
+# Developer tooling for source checkouts (ensure-runtime.sh syncs it where .git
+# exists); packaged installs never carry it.
+dev = [
+    "pytest>=9.0",
+    "pytest-timeout>=2.4",  # per-test wall-clock backstop — see pytest.ini
+    "py-spy>=0.4",  # attaches to the daemon — why ./dev bundles its own Python
+]
+
+[tool.uv]
+package = false  # a plugin, not a distributable Python package
+
+[tool.brain.embedder]
+# nomic-embed-text v1.5, int8-quantized ONNX (adopted 2026-04-17). The revision
+# and sha freeze the exact Hugging Face artifact; embedder.load_model refuses
+# to serve anything else (operator ruling 2026-08-07: no silent model refresh).
+model_name = "nomic-ai/nomic-embed-text-v1.5-Q"
+dim = 768
+pinned_revision = "e9b6763023c676ca8431644204f50c2b100d9aab"
+pinned_onnx_sha256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"

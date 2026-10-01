@@ -1,0 +1,39 @@
+{
+  "name": "entity",
+  "version": "0.9.0",
+  "description": "Memory for Claude Code and Codex. It keeps a record of its conversations, turns them into memories it recalls in later sessions, and keeps corrections attached to what they corrected. Runs on your machine. Requires your own Anthropic API key.",
+  "keywords": [
+    "identity",
+    "memory",
+    "knowledge-graph",
+    "persistent",
+    "semantic",
+    "embeddings",
+    "self-correction",
+    "hooks",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.codex.json",
+  "mcpServers": {
+    "brain": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "root=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; best=; for d in \"$root\"/*/entity/*/; do [ -x \"$d/hooks/scripts/mcp-launch.sh\" ] || continue; { [ -z \"$best\" ] || ! [ \"$best\" -nt \"$d\" ]; } && best=\"$d\"; done; [ -n \"$best\" ] || { echo \"[brain-mcp] no installed entity plugin under $root\" >&2; exit 1; }; exec \"$best/hooks/scripts/mcp-launch.sh\" --adapter codex_setup.py"
+      ],
+      "env": { "PYTHONUNBUFFERED": "1", "BRAIN_MCP_BOOTSTRAP_WAIT_S": "300" },
+      "env_vars": ["CODEX_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "BRAIN_DB_DIR"],
+      "startup_timeout_sec": 360
+    }
+  },
+  "interface": {
+    "displayName": "Entity",
+    "shortDescription": "Memory for Claude Code and Codex that carries across sessions. Requires an Anthropic API key.",
+    "longDescription": "Memory for Claude Code and Codex. It keeps a record of its conversations, turns them into memories it recalls in later sessions, and keeps corrections attached to what they corrected. Runs on your machine. Requires your own Anthropic API key. Version 0.9 works with Codex but isn't optimized for Codex yet.",
+    "developerName": "Tom Pachys",
+    "category": "Other",
+    "websiteUrl": "https://github.com/tpac/entity"
+  }
+}

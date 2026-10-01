@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.brain.daemon</string>
+
+	<!-- Brain daemon launchd service. In the repo this file is a TEMPLATE
+	     whose paths are per-machine placeholders; install-daemon-service.sh
+	     (run by boot-brain.sh on fresh installs) substitutes them and installs
+	     the live copy at ~/Library/LaunchAgents/com.brain.daemon.plist (don't
+	     hand-load the repo template — its placeholder paths won't resolve). See
+	     docs/DAEMON-LIFECYCLE-ARCH-PLAN.md Step 7.
+
+	     launchd is the SOLE daemon SPAWNER where present (Errno-48 fix): this
+	     plist's KeepAlive + RunAtLoad own process creation — crash respawns and
+	     corpse recovery (`launchctl kickstart -k`) — and no process ever Popens
+	     a rival alongside it. Deploy restarts are not spawns: the daemon
+	     reloads in place (exec of brain-daemon, same PID), invisible to
+	     launchd. This file is where the spawner policy is ENCODED.
+
+	     Launches hooks/scripts/brain-daemon — the single daemon entrypoint
+	     (no hardcoded Python path); it sources brain-env.sh and execs the venv
+	     Python so the interpreter + boot sequence follow the repo, not this XML.
+
+	     EnvironmentVariables carries the CPU-only invariant (DAEMON_CPU_ENV in
+	     servers/daemon_config.py) so onnxruntime/torch see it from PID birth,
+	     before any C extension imports. test_daemon_recovery's
+	     TestDaemonConfigSingleSource pins this dict == DAEMON_CPU_ENV and the
+	     ThrottleInterval == LAUNCHD_THROTTLE_INTERVAL_S, so the XML can't drift
+	     from the Python constants again (the drift Step 1 named). -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PLUGIN_DIR__/hooks/scripts/brain-daemon</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>BRAIN_DB_DIR</key>
+		<string>__BRAIN_DB_DIR__</string>
+		<key>ORT_DISABLE_ALL_ACCELERATORS</key>
+		<string>1</string>
+		<key>ONNX_PROVIDERS</key>
+		<string>CPUExecutionProvider</string>
+		<key>PYTORCH_MPS_DISABLE</key>
+		<string>1</string>
+		<key>VECLIB_MAXIMUM_THREADS</key>
+		<string>1</string>
+		<key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+		<string>0</string>
+	</dict>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>__BRAIN_DB_DIR__/daemon.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>__BRAIN_DB_DIR__/daemon.log</string>
+
+	<key>WorkingDirectory</key>
+	<string>__PLUGIN_DIR__</string>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

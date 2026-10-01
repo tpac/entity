@@ -1,0 +1,60 @@
+/* ==========================================================================
+   Brain Dashboard — design tokens
+   --------------------------------------------------------------------------
+   Every color, spacing, font-size, and radius lives here; other CSS
+   references them via var(--token).
+   ========================================================================== */
+
+:root {
+  /* ── Backgrounds (dark surface stack) ─────────────────────────────── */
+  --bg-page:    #0a0a0f;   /* outermost */
+  --bg-panel:   #111118;   /* card / feed-row default */
+  --bg-raised:  #1a1a2a;   /* chip / hover / dropdown */
+  --bg-deep:    #050510;   /* code blocks, deepest */
+
+  /* ── Borders ──────────────────────────────────────────────────────── */
+  --border-faint:  #1a1a2a;
+  --border-base:   #2a2a3a;
+  --border-strong: #3a3a5a;
+
+  /* ── Text ─────────────────────────────────────────────────────────── */
+  --text-body:    #e0e0e0;   /* paragraph */
+  --text-heading: #ccc;      /* card title */
+  --text-muted:   #888;      /* meta */
+  --text-subtle:  #555;      /* low-attention chrome (id, timestamp) */
+  --text-faint:   #444;      /* near-invisible */
+
+  /* ── Accent palette (semantic) ────────────────────────────────────── */
+  --accent-blue:    #7eb8ff;   /* primary, S1, links, focus */
+  --accent-green:   #33ff88;   /* alive, created, ok, success */
+  --accent-amber:   #ffaa33;   /* warn, K events, restart, S2 */
+  --accent-red:     #ff6666;   /* errors, corrections, danger */
+  --accent-purple:  #aa66ff;   /* S0, decisions, enriched */
+  --accent-pink:    #ff66aa;   /* healer, S4 */
+  --accent-cyan:    #45B7D1;   /* community, S2 cyan-side */
+
+  /* ── Encoding source / role tints ─────────────────────────────────── */
+  --role-hook:   var(--accent-blue);   /* automatic (UserPromptSubmit) */
+  --role-mcp:    #b8ff7e;              /* Anchor-driven via MCP */
+
+  /* ── Spacing scale (4px base) ─────────────────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3: 12px;
+  --space-4: 16px;
+
+  /* ── Typography ───────────────────────────────────────────────────── */
+  --font-mono: 'SF Mono', 'Fira Code', monospace;
+  --fs-xxs:  9px;     /* trace event_type pill */
+  --fs-xs:  10px;     /* badge, chip */
+  --fs-sm:  11px;     /* card meta */
+  --fs-md:  12px;     /* card body (base) */
+  --fs-lg:  13px;     /* section heading */
+  --fs-xl:  22px;     /* stat counter */
+
+  /* ── Radii ────────────────────────────────────────────────────────── */
+  --radius-sm:  3px;
+  --radius-md:  4px;
+  --radius-lg:  6px;
+  --radius-xl:  8px;
+}

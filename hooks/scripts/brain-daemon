@@ -1,0 +1,74 @@
+#!/bin/bash
+# brain — Daemon launcher for macOS LaunchAgent.
+#
+# Called by ~/Library/LaunchAgents/com.brain.daemon.plist as the single
+# entry point. exec's the daemon process directly so launchd's KeepAlive
+# sees the real daemon PID.
+#
+# Lives in the repo so the Python version + boot sequence follow the
+# codebase, not a hand-edited plist. To change how the daemon starts,
+# edit this file — not ~/Library/LaunchAgents/.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve the brain location through the SAME ladder every hook uses
+# (resolve-brain-db.sh sources brain-env.sh: BRAIN_PYTHON, PATH, user env,
+# ensure-runtime.sh on fresh installs). The plist-baked BRAIN_DB_DIR arrives
+# in our environment and becomes the ladder's fast-path HINT — confirmed only
+# if brain.db is actually there — not a verdict. A daemon relaunched after
+# the user adopted a new brain location follows the ladder to the new path
+# instead of writing the frozen plist snapshot forever (D-13 step 4a).
+# `|| true` covers the SOURCE returning non-zero, not the sourced file's own
+# commands: under `set -e` above, the first failing bare command anywhere in
+# the resolver chain exits this script directly and the FATAL diagnostics below
+# never print — launchd then respawns on the 10s throttle. What `|| true` does
+# buy is that a resolver ending on a false test is not itself fatal, so a
+# genuine no-brain result surfaces below as empty BRAIN_DB_DIR with the
+# resolver's own stderr kept.
+# NO_PERSIST: the daemon consumes the resolution, it is not an authority on
+# it — a relaunch running off baked plist state must not overwrite the
+# resolved.env record hooks maintain.
+export BRAIN_RESOLVE_NO_PERSIST=1
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-brain-db.sh" || true
+
+# Fail fast with a specific error if the venv Python is missing. Without
+# this, launchd would respawn every 10s in a confusing loop.
+if [ ! -x "$BRAIN_PYTHON" ]; then
+    echo "[brain-daemon] FATAL: venv python not executable at $BRAIN_PYTHON" >&2
+    echo "[brain-daemon] Run: $SCRIPT_DIR/ensure-runtime.sh" >&2
+    exit 1
+fi
+
+# The ladder found nothing (no baked env, no existing brain, no persisted
+# record) — or the adoption net refused to create over an orphaned brain.
+# No /tmp fallback — silent data loss is worse.
+if [ -z "$BRAIN_DB_DIR" ]; then
+    if [ -n "${BRAIN_ADOPTION_CANDIDATE:-}" ]; then
+        echo "[brain-daemon] FATAL: refused to create — existing brain at $BRAIN_ADOPTION_CANDIDATE; set BRAIN_DB_DIR in ${XDG_CONFIG_HOME:-$HOME/.config}/brain/env to adopt it" >&2
+    elif [ -n "${BRAIN_MISSING_BRAIN:-}" ]; then
+        echo "[brain-daemon] FATAL: refused to create — this machine's brain lived at $BRAIN_MISSING_BRAIN and is no longer there; a new session explains the options" >&2
+    else
+        echo "[brain-daemon] FATAL: BRAIN_DB_DIR unresolved" >&2
+    fi
+    exit 1
+fi
+
+DB_PATH="$BRAIN_DB_DIR/brain.db"
+
+# The daemon's entry point — the SAME command daemon_launch.daemon_argv()
+# builds for the no-launchd spawn path, so both routes exec identically
+# (tests/test_daemon_recovery.py compares them). The DB path is an argv
+# element, so it is data whatever it contains: spaces, quotes, backslashes.
+#
+# PYTHONPATH, not a sys.path line inside the program: `-m` must resolve the
+# package before any of our code runs. It is prepended, never replaced.
+export PYTHONPATH="$PLUGIN_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# exec so launchd supervises the daemon directly (not this shell).
+# KeepAlive restarts the daemon, not the shell, when it exits. The role-named
+# interpreter makes the process read `Entity-daemon` in Activity Monitor
+# (brain-env.sh brain_python_as); the fallback is the plain venv python.
+exec "${BRAIN_PYTHON_DAEMON:-$BRAIN_PYTHON}" -m servers.daemon_server "$DB_PATH"
