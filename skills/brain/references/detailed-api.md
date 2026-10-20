@@ -88,7 +88,7 @@ hex strings — the same ids `source_refs` on nodes point at.
 | Tool | Purpose |
 |---|---|
 | `recall_episodes` | Episodic recall — the verbatim record of what was said and done, with attribution. `query` (semantic) and/or `contains` (exact substring), composable. Defaults to conversation messages at s0; `ref_type='tool_result'` for the "what I did" lens. `limit` default 10, cap 500. |
-| `query_traces` | Search trace events by scale / event_type / ref_type / chain / session. `hours` default 24; a `session_id` filter is authoritative and ignores the window. `grouped=true` nests events by chain. |
+| `query_traces` | Search trace events by scale / event_type / ref_type / chain / session. `hours` default 24; a plain `session_id` or `session_ids` filter ignores the window (it still applies with `ref_type`, and with `grouped=true`, and the reply says so). A session filter takes the full id or the short trace headers show; `session_ids` takes several, never an empty list. `grouped=true` nests events by chain — it needs `session_id` or `session_ids` and is refused beside `ref_type` or `event_type`. |
 | `get_trace` | Point-lookup by id — the body renders whole, never trimmed. `rich=true` swaps the metadata gist for the full payload (the run record on s1/s2 encoder rows; nothing extra on an s0 turn). |
 | `get_traces` | Batch point-lookup — the natural way to expand a node's `source_refs`. Serves 50 ids per call and flags the overflow; unmatched ids are named. Bodies are trimmed with the dropped-char count; `rich=true` for full metadata. |
 | `count_traces` | Group-by counts over trace events (`event_type`, `ref_type`, `chain_id`, `scale`). |
@@ -99,21 +99,21 @@ never are.
 
 ### Self channel (parallel sessions)
 
-Concurrent sessions are streams of the same agent, discoverable and reachable:
+Concurrent sessions of the same agent are discoverable and reachable:
 
 | Tool | Purpose |
 |---|---|
-| `self_presence` | Roster of live streams, each with its arc and recent activity. |
-| `self_peek` | Read one stream's current focus. Read-only, no interruption. |
-| `self_send` | Message a stream's inbox (id-prefix, full session id, or `broadcast`). Consumed once. |
-| `self_inbox` | Drain messages other streams sent you. |
+| `self_presence` | Roster of live sessions, each with its arc and recent activity. |
+| `self_peek` | Read one session's current focus. Read-only, no interruption. |
+| `self_send` | Message a session's inbox (the short id you see, the full session id, or `broadcast`). Consumed once. |
+| `self_inbox` | Drain messages other sessions sent you. |
 | `self_outbox` | Delivery receipts for what you sent — distinguishes "delivered, not acted on" from "never delivered". |
 
 ### Thalamus (standing intents)
 
 | Tool | Purpose |
 |---|---|
-| `remind` | File an item with delivery policy: a reminder (`what` + `when` — fires at the first session after due), a notice (`for_whom='all'` window broadcast, or `'live'` one-shot to live streams), or an ask (`needs_answer=true` — renders at every session boot until answered, or until a cap of sessions passed on it, then expires loudly). `dedup_key` makes re-filing update instead of duplicate; `expires` sets when delivery ends (default: the kind's window from `when`). |
+| `remind` | File an item with delivery policy: a reminder (`what` + `when` — fires at the first session after due), a notice (`for_whom='all'` window broadcast, or `'live'` one-shot to live sessions), or an ask (`needs_answer=true` — renders at every session boot until answered, or until a cap of sessions passed on it, then expires loudly). `dedup_key` makes re-filing update instead of duplicate; `expires` sets when delivery ends (default: the kind's window from `when`). |
 | `thalamus_list` | The open queue, due items first (most recently due first), then scheduled ones (soonest first); `include_closed=true` adds terminal items. A page at a time: `total` counts every match, `offset` reads the next page. |
 | `thalamus_resolve` | Close or defer one item: exactly one of `answer`, `defer_until`, or `dismiss=true`. |
 

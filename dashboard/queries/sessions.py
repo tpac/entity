@@ -1,16 +1,18 @@
 """Recent sessions — the one place a session_id becomes something readable.
 
-A session is a stream of thought working somewhere. The brain already persists
+A session is me working somewhere. The brain already persists
 where: `SessionContext.save()` writes cwd / branch / worktree / project into
 `session_state` under the `_session_context` key. This module joins that to the
 trace counts so every session_id the dashboard shows can carry a human handle
 and a hover with enough to find the thing again.
 
-Identity convention (matched to the Streams tab and the brain's own
-"one stream, one worktree — your handle is your branch name"): the handle is
+Identity convention (matched to the Sessions tab and the brain's own
+"one session, one worktree — your handle is your branch name"): the handle is
 the worktree name, else the branch tail with the shared `claude/` namespace
-dropped, else the 8-char hex. Never invented — if the brain never learned
-where a session was working, its handle stays the hex, honestly.
+dropped, else empty. Never invented — if the brain never learned where a
+session was working, it has no handle, and the browser labels it by its
+session short (lib/sessions.js sessionShort, the dashboard's one copy of
+trace_contract.session_short). No short is cut here.
 """
 
 import json
@@ -20,7 +22,7 @@ from ..db import logs_db_path
 from ..query import safe_query
 
 
-def _handle(env: dict, session_id: str) -> str:
+def _handle(env: dict) -> str:
     """Readable handle for one session, from its persisted env."""
     worktree = (env.get('worktree') or '').strip()
     if worktree:
@@ -28,9 +30,9 @@ def _handle(env: dict, session_id: str) -> str:
     branch = (env.get('branch') or '').strip()
     if branch and branch != 'unknown':
         # Worktree branches are `claude/<name>`; the namespace is shared by
-        # every stream, so the distinctive tail is the handle.
+        # every session, so the distinctive tail is the handle.
         return branch.split('/', 1)[1] if '/' in branch else branch
-    return (session_id or '')[:8]
+    return ''
 
 
 @safe_query('queries.sessions', logs_db_path)
@@ -39,12 +41,12 @@ def query_recent_sessions(conn, limit: int = 80, days: int = 7):
 
     The limit is generous (80) because this feeds a REGISTRY, not a dropdown:
     every session_id the feed can show must resolve to a name, and the Live
-    tab's 48h encode window routinely spans more streams than a picker-sized
+    tab's 48h encode window routinely spans more sessions than a picker-sized
     list would cover — a session past the cut renders as raw hex.
 
-    Per session: `id`, `short`, `handle` (the display name), `first`/`last`
-    seen, `events` count, plus whatever env the brain recorded (`branch`,
-    `worktree`, `project`, `cwd`, and the LATEST `model` / `host` the stream
+    Per session: `id`, `handle` (the display name, '' when unknown),
+    `first`/`last` seen, `events` count, plus whatever env the brain recorded (`branch`,
+    `worktree`, `project`, `cwd`, and the LATEST `model` / `host` the session
     rode on — per-turn values live on the S0 rows) and its accumulated `arc`
     line. The frontend renders `handle` and puts the rest in the hover — one
     shape, so no caller re-derives a label.
@@ -84,8 +86,7 @@ def query_recent_sessions(conn, limit: int = 80, days: int = 7):
         env = env_by_session.get(sid, {})
         out.append({
             "id": sid,
-            "short": sid[:8],
-            "handle": _handle(env, sid),
+            "handle": _handle(env),
             "first": r[1],
             "last": r[2],
             "events": r[3],

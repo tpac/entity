@@ -128,6 +128,19 @@ class TestTraceRender(unittest.TestCase):
         self.assertNotIn("[]", out)
         self.assertTrue(out.startswith("community_enrichment ·"))
 
+    def test_trace_and_chain_headers_name_the_session_by_its_short(self):
+        """A trace's [session] bracket and a chain header name the session by
+        its session_short — the form its chain ids carry — so two same-minute
+        Codex sessions (UUIDv7, shared head) read apart."""
+        sid = "01a131e3-a8a5-7bb0-8415-781037851afe"
+        row = _trace_row()
+        row["session_id"] = sid
+        self.assertTrue(_format_result("get_trace", row).startswith("[781037851afe]"))
+        out = _format_result("query_traces", {"chains": [{
+            "chain_id": "s0-781037851afe-0", "scale": "s0", "session_id": sid,
+            "events": [_grouped_event("ab120001")]}]})
+        self.assertIn("· s0 · 781037851afe ·", out)
+
     def test_get_traces_envelope(self):
         """Batch envelope: every row renders."""
         out = _format_result("get_traces", {
@@ -203,6 +216,21 @@ class TestTraceRender(unittest.TestCase):
         self.assertIn("Anchor", out)                      # who-framing preserved
         self.assertIn("EPISODE_SENTINEL", out)            # body
         self.assertNotIn("s0 delta", out)                 # episode format hides scale chrome
+
+    def test_incoming_speaker_labels_the_episode(self):
+        # A brain delivery is labelled by its speaker, never the operator's
+        # identity the row also carries; the ref_type stays beside it.
+        ep = {"id": "ee00ee00", "session_id": "aaaa1111", "scale": "s0",
+              "event_type": "K", "ref_type": "thalamus_delivery",
+              "summary": "delivered 1 item at stop",
+              "created_at": "2026-06-29T00:31:00+00:00",
+              "metadata": {"content": "a reminder is due DELIVERY_SENTINEL",
+                           "human_identity": "Ada"}}
+        out = _format_result("recall_episodes",
+                             {"episodes": [ep], "ranked_by": "time"})
+        self.assertIn("brain · 2026-06-29 00:31 · thalamus_delivery", out)
+        self.assertNotIn("Ada", out)
+        self.assertIn("DELIVERY_SENTINEL", out)
 
 
 if __name__ == "__main__":

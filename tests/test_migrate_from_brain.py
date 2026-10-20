@@ -347,6 +347,23 @@ class TestMigrateFromBrain(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no 'plugin uninstall --keep-data'", out)
 
+    def test_without_claude_on_path_the_newest_desktop_copy_is_used(self):
+        # the desktop app bundles claude under claude-code/<version>/, in
+        # older releases directly, in newer ones one folder deeper
+        desk = os.path.join(self.home, 'Library', 'Application Support', 'Claude', 'claude-code')
+        stub = os.path.join(self.bin, 'claude')
+        copies = {}
+        for rel in ('2.1.288', os.path.join('2.1.295', '9d6405864fdc')):
+            macos = os.path.join(desk, rel, 'claude.app', 'Contents', 'MacOS')
+            os.makedirs(macos)
+            copies[rel] = os.path.join(macos, 'claude')
+            subprocess.run(['cp', '-p', stub, copies[rel]], check=True)
+        os.remove(stub)
+        r, out = self.run_script()
+        self.assertNotIn('no claude command', out)
+        self.assertIn(copies[os.path.join('2.1.295', '9d6405864fdc')] + ' (', out)
+        self.assertIn('nothing to migrate', out)
+
     # ── changes refuse under a borrowed HOME ────────────────────────────────
     def test_apply_refuses_under_a_borrowed_home_and_changes_nothing(self):
         d = self.parked()

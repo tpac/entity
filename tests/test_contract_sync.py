@@ -31,11 +31,10 @@ class TestBrainMethodsExist(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Introspect all brain modules for public encoding/connection methods."""
-        from servers import brain_reminders, brain_connections, brain_remember
+        from servers import brain_connections, brain_remember
 
         cls.methods = {}
         for mod_name, mod in [
-            ('brain_reminders', brain_reminders),
             ('brain_connections', brain_connections),
             ('brain_remember', brain_remember),
         ]:
@@ -122,6 +121,7 @@ class TestDaemonDispatchSync(unittest.TestCase):
             'auto_heal', 'auto_tune',
             'consciousness', 'dismiss_signal', 'queue_state',
             'migrate_to_aspects',  # retired 2026-05-29 — obsolete aspect-node migration
+            'pre_edit',  # 2026-10-09 — hook_pre_edit is the tool moment's only door
             # no sender (2026-09-29):
             'validate_config', 'procedure_trigger', 'get_debug_status',
             'health_check', 'log_debug', 'promote_staged', 'backfill_vectors',

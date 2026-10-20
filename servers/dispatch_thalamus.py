@@ -11,7 +11,9 @@ module, so every entry registers is_write=False (the dispatch_self pattern).
 Handlers return the {"ok", "result"} envelope like every dispatch_*.py.
 """
 
+from servers.channels.self_channel import signal
 from servers.channels.thalamus import thalamus
+from servers.channels.thalamus import thalamus_contract as tc
 from servers.dispatch_common import caller_session
 
 
@@ -22,12 +24,13 @@ def _handle_remind(brain, args, graph_changes):
     args.when         = shorthand ('2h','3d','1w'), ISO, or ''/now (immediate).
     args.expires      = when delivery ends (same grammar); omitted → the
                         kind's default window from `when`.
-    args.for_whom     = ''/None (default), 'live' (broadcast to live streams
+    args.for_whom     = ''/None (default), 'live' (broadcast to live sessions
                         now via the courier), 'all' (every session in window,
-                        up to the delivery cap), or a full session UUID
-                        (directed).
+                        up to the delivery cap), or one session (directed)
+                        by its full id or its short, resolved against the live
+                        sessions like self_send's target (signal.resolve_session).
     args.needs_answer = ask semantics: renders per session until answered
-                        (broadcast at boot, directed at that session's Stop);
+                        (broadcast at the session's first prompt, directed at that session's Stop);
                         expires loudly at its window or once the delivery cap
                         of sessions passed on it.
     args.refs         = node ids, resolved at render.
@@ -35,14 +38,21 @@ def _handle_remind(brain, args, graph_changes):
                         An identity that expired unanswered is refused for a
                         cool-off (it already ran its full delivery cycle).
     """
+    for_whom = args.get('for_whom')
+    fw = (for_whom or '').strip()
+    if fw and fw.lower() not in tc.FOR_WHOM_WORDS:
+        for_whom, error = signal.resolve_session(brain, fw)
+        if error:
+            return {"ok": False, "error": "remind: for_whom is 'live', 'all', "
+                                          "or a session — " + error}
     result = thalamus.file(
         brain,
-        source='anchor',
+        source=tc.INTERACTIVE_SOURCE,
         body=args.get('what', '') or '',
         needs_answer=bool(args.get('needs_answer', False)),
         when=args.get('when'),
         expires=args.get('expires'),
-        for_whom=args.get('for_whom'),
+        for_whom=for_whom,
         refs=args.get('refs'),
         dedup_key=args.get('dedup_key'),
         session_id=caller_session(args))

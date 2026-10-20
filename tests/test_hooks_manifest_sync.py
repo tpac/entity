@@ -28,7 +28,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from servers.host_contract import HOST_CONTRACT  # noqa: E402
+from servers.host_contract import ADAPTER_FILENAME, HOST_CONTRACT  # noqa: E402
 
 # Events the Codex hook engine dispatches (learn.chatgpt.com/docs/hooks) — the
 # contract owns the list, dated by the host version it was read against.
@@ -243,6 +243,19 @@ class TestContractManifestParity(unittest.TestCase):
             self.assertEqual(set(entry["events"]), set(self._manifest(host)),
                              "%s: contract events != %s events" % (host, entry["manifest"]))
 
+    def test_contract_adapter_is_the_one_the_mcp_launcher_loads(self):
+        """The prompt hook finds a host's adapter in the contract; the MCP
+        proxy is told it by the host's plugin manifest. One module, both ways."""
+        launchers = {"codex": ".codex-plugin/plugin.json", "claude-code": ".mcp.json"}
+        self.assertEqual(set(launchers), set(HOST_CONTRACT))
+        for host, path in launchers.items():
+            with open(os.path.join(_ROOT, path)) as f:
+                named = re.findall(r"--adapter (%s)" % ADAPTER_FILENAME, f.read())
+            adapter = HOST_CONTRACT[host]["adapter"]
+            self.assertEqual(named, [adapter] if adapter else [], "%s: %s vs the contract" % (host, path))
+            if adapter:
+                self.assertTrue(os.path.isfile(os.path.join(_ROOT, "hooks", "adapters", adapter)), adapter)
+
     def test_registered_events_within_engine_events(self):
         for host, entry in HOST_CONTRACT.items():
             unknown = set(self._manifest(host)) - set(entry["engine_events"])
@@ -275,41 +288,85 @@ class TestContractManifestParity(unittest.TestCase):
 _SCRIPTS_DIR = os.path.join(_HOOKS_DIR, "scripts")
 _HANDLER_SCRIPT = re.compile(r'hooks/scripts/([\w.-]+)"')
 _SHIM_EXEC_PY = re.compile(r'\$\(dirname "\$0"\)/(\w+\.py)"')
+# A payload read that bypasses hook_common.get_hook_input: raw stdin, or the
+# env var by name (a comment naming HOOK_INPUT bare is fine).
+_DIRECT_PAYLOAD_READ = re.compile(r'sys\.stdin|[\'"]HOOK_INPUT[\'"]')
+_RUN_HOOK_CALL = re.compile(r'run_hook\(([^)]*)\)')
 
 
-def _reads_hook_input(py_name):
-    with open(os.path.join(_SCRIPTS_DIR, py_name)) as f:
-        return "get_hook_input()" in f.read()
+def _read_script(name):
+    with open(os.path.join(_SCRIPTS_DIR, name)) as f:
+        return f.read()
+
+
+def _reads_payload(src):
+    """A client reads the payload when it calls get_hook_input() or runs gated —
+    run_hook's gate calls get_hook_input() before the body."""
+    return ("get_hook_input(" in src
+            or any("gated=False" not in call for call in _RUN_HOOK_CALL.findall(src)))
+
+
+def _handler_wiring():
+    """(manifest, event, script) for every manifest handler — the script a
+    host runs, a .py run bare or a .sh shim."""
+    for name in ("hooks.json", "hooks.codex.json"):
+        for event, groups in _load(name).items():
+            for group in groups:
+                for handler in group["hooks"]:
+                    yield name, event, _HANDLER_SCRIPT.search(handler["command"]).group(1)
 
 
 class TestShimsDeliverPayload(unittest.TestCase):
-    """A hook's stdin payload reaches its Python client only through the
-    HOOK_INPUT env var the bash shim exports; hook_common.get_hook_input reads
-    it. A client run without that export parses {} — no session_id on Codex,
-    where no env var backfills it."""
+    """The payload reaches a hook client one of two ways: a shim exports it as
+    HOOK_INPUT, or a .py run bare inherits it on stdin. hook_common.get_hook_input
+    reads env-else-stdin once and caches it (its own behavior is tested in
+    test_brain_gate), and run_hook's gate calls it before every gated body — so
+    a gated client reads the payload whether or not its source says so. Both
+    ways to lose the payload are wiring, which only these manifests show:
 
-    def test_every_payload_reader_gets_hook_input(self):
-        for name in ("hooks.json", "hooks.codex.json"):
-            for event, groups in _load(name).items():
-                for group in groups:
-                    for handler in group["hooks"]:
-                        script = _HANDLER_SCRIPT.search(handler["command"]).group(1)
-                        if script.endswith(".py"):
-                            self.assertFalse(
-                                _reads_hook_input(script),
-                                "%s %s runs %s directly, but it reads HOOK_INPUT, "
-                                "which only a shim exports" % (name, event, script))
-                            continue
-                        with open(os.path.join(_SCRIPTS_DIR, script)) as f:
-                            shim = f.read()
-                        clients = _SHIM_EXEC_PY.findall(shim)
-                        self.assertTrue(clients, "%s execs no recognizable client" % script)
-                        for client in clients:
-                            if _reads_hook_input(client):
-                                self.assertIn(
-                                    "export HOOK_INPUT=", shim,
-                                    "%s %s: %s runs %s, which reads HOOK_INPUT, "
-                                    "but never exports it" % (name, event, script, client))
+    - a shim that consumes stdin without exporting it hands a payload-reading
+      client {}: the gate sees no cwd, so an ignored project is not ignored, and
+      on Codex the body has no session_id. (boot-brain.sh exports nothing: it
+      asks the gate itself and boot_brain.py runs gated=False on BRAIN_HOOK_*
+      env — flip it back to gated and this fires.)
+    - a client that reads stdin itself finds it already drained by the gate
+      (or by its shim) and silently does nothing; one that reads the env var by
+      name skips get_hook_input's session_id backfill.
+    """
+
+    def test_shims_export_the_payload_to_clients_that_read_it(self):
+        # Whether a shim touches stdin is not detectable in general ($(cat),
+        # read, an inline python -c), so the export is the contract.
+        shims = {s for _m, _e, s in _handler_wiring() if s.endswith(".sh")}
+        self.assertTrue(shims, "no shim handlers found — the wiring parse broke")
+        for script in sorted(shims):
+            shim = _read_script(script)
+            clients = _SHIM_EXEC_PY.findall(shim)
+            self.assertTrue(clients, "%s execs no recognizable client" % script)
+            for client in clients:
+                if _reads_payload(_read_script(client)):
+                    self.assertTrue("export HOOK_INPUT=" in shim,
+                                    "%s runs %s, which reads the payload, but never "
+                                    "exports HOOK_INPUT, so it parses {}"
+                                    % (script, client))
+
+    def test_clients_read_the_payload_only_through_get_hook_input(self):
+        clients = {}
+        for manifest, event, script in _handler_wiring():
+            if script.endswith(".py"):
+                clients.setdefault(script, "%s %s (bare)" % (manifest, event))
+            else:
+                for client in _SHIM_EXEC_PY.findall(_read_script(script)):
+                    clients.setdefault(client, "%s %s via %s" % (manifest, event, script))
+        self.assertTrue(any(w.endswith("(bare)") for w in clients.values()),
+                        "no bare .py handlers found — the wiring parse broke")
+        for client, wiring in sorted(clients.items()):
+            m = _DIRECT_PAYLOAD_READ.search(_read_script(client))
+            if m:
+                self.fail("%s (%s) reads %s directly — stdin is already drained "
+                          "by run_hook's gate, the env var skips the session_id "
+                          "backfill; use hook_common.get_hook_input()"
+                          % (client, wiring, m.group(0)))
 
 
 if __name__ == "__main__":

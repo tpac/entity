@@ -1,16 +1,21 @@
-"""Channels — the correspondents that ADDRESS a live stream.
+"""Channels — the correspondents that ADDRESS a live session.
 
 A channel is a CORRESPONDENT plus a WIRE, indexed the way
 `docs/LATERAL-SCALES.md` indexes laterals — by who is on the other end:
 
-    self_channel/   another stream of me (`peer:` once a persistent one exists)
-    thalamus/       the brain itself, speaking to its streams
+    self_channel/   another session of me (`peer:` once a persistent one exists)
+    thalamus/       the brain itself, speaking to its sessions
 
 "Addresses" is the boundary, not "reaches". Recall, the Frame and the boot
-render all reach a live stream and live elsewhere (`scales/s1`,
+render all reach a live session and live elsewhere (`scales/s1`,
 `brain_voice.py`); they are output, not correspondence. Nor is this the
 `additionalContext` sense of "channel" used in CLAUDE.md's Conventions — that
 names the injection pipe, this names who is speaking.
+
+One piece here also serves a door that is not correspondence: the session
+resolver, `self_channel/signal.resolve_session`, names the session behind the
+trace filters too (its `history` pool), so a session reference resolves one
+way everywhere.
 
 NOT under `scales/`: neither package runs an `integrate(O, K) → Δ` loop, and
 the delivery windows here are real-elapsed by design (TTLs, roster staleness).

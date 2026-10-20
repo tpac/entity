@@ -1,5 +1,6 @@
-"""PreToolUse(Edit|Write) — surfaces brain rules/suggestions before edits.
-Thin client: sends hook_pre_edit to daemon.
+"""PreToolUse(Edit|Write) — the tool moment: memories about a file at its
+agent's first edit of it. Thin client: sends hook_pre_edit to the daemon,
+which decides whether this edit is a first one and what to show.
 Output: hookSpecificOutput.additionalContext when there is something to
 surface, otherwise nothing (see hook_common.emit_hook_output).
 """
@@ -10,39 +11,36 @@ from hook_common import (get_hook_input, daemon_available, daemon_call_raw, daem
                          brain_debug, emit_hook_output, tool_target_file, run_hook)
 
 hook_input = get_hook_input()
-tool_input = hook_input.get("tool_input", {})
-file_path = tool_target_file(tool_input)
-tool_name = hook_input.get("tool_name") or ""
+file_path = tool_target_file(hook_input.get("tool_input", {}))
 
 if not file_path:
     sys.exit(0)
 
-filename = os.path.basename(file_path)
-
-# Skip non-source files
-skip_exts = [".log", ".map", ".lock", ".json"]
-if any(filename.endswith(ext) for ext in skip_exts) and filename != "package.json":
-    brain_debug("suggest: skipped %s (non-source)" % filename)
-    sys.exit(0)
+# The cue names the file as the session sees it: relative to its working
+# directory when the file is under it, so the same file reads the same way on
+# every edit.
+cwd = hook_input.get("cwd") or ""
+path = file_path
+if cwd and os.path.isabs(file_path):
+    rel = os.path.relpath(file_path, cwd)
+    if not rel.startswith(".."):
+        path = rel
 
 t0 = time.time()
 def main():
     if daemon_available():
         resp = daemon_call_raw("hook_pre_edit", {
-            "filename": filename,
-            "tool_name": tool_name,
+            "path": path,
             "session_id": hook_input.get("session_id", ""),
+            # Present only on a subagent's tool call (Claude Code).
+            "agent_id": hook_input.get("agent_id", ""),
         }, timeout=7.0)
         latency = (time.time() - t0) * 1000
         if resp.get("ok"):
-            result = resp.get("result", {})
-            if "json" in result:
-                j = result["json"]
-                reason = j.get("reason", "")
-                brain_debug("suggest: %s → %d chars, %dms" % (filename, len(reason), latency))
-                emit_hook_output("PreToolUse", j)
-            else:
-                brain_debug("suggest: %s → no rules, %dms" % (filename, latency))
+            j = resp.get("result", {}).get("json") or {}
+            brain_debug("suggest: %s → %d chars, %dms"
+                        % (path, len(j.get("additionalContext", "")), latency))
+            emit_hook_output("PreToolUse", j)
     else:
         emit_hook_output("PreToolUse", {"additionalContext": daemon_unavailable_error("pre_edit_suggest")})
 

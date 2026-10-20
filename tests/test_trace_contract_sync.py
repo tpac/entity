@@ -304,16 +304,17 @@ class TestTraceContractSync:
         # Validates itself instead: _emit_mutation_traces calls
         # validate_trace_event(scale, 'delta', ref_type) per row before writing.
         'servers/mutation_emitter.py',
-        # Two variable-scale doors. write_journal_notes: ref_type is the
-        # literal 'journal_note', `scale` is the caller's (s1 Scribe or an
-        # S2 unit) — covered by the (s1|s2, delta, journal_note)
-        # registrations. write_thalamus_filed: scale is DERIVED from the
-        # chain (scale_for_chain), ref_type is the REF_THALAMUS_FILED name —
-        # covered by the (s1|s2, delta) registrations; an unregistered scale
-        # is caught at the write boundary and pinned by
-        # test_thalamus.TestFiledTrace.
-        'servers/brain_traces.py',
     }
+    # servers/brain_traces.py is visible through write_tool_moment's (s1, K)
+    # call; its ref_type is the REF_TOOL_SHOWN name, which the extractor reads
+    # as '' — validate_trace_event checks it at write time. Two doors are not
+    # visible at all: write_journal_notes (ref_type
+    # the literal 'journal_note', `scale` the caller's — s1 Scribe or an S2
+    # unit — covered by the (s1|s2, delta, journal_note) registrations) and
+    # write_thalamus_filed (scale DERIVED from the chain via scale_for_chain,
+    # ref_type the REF_THALAMUS_FILED name — covered by the (s1|s2, delta)
+    # registrations; an unregistered scale is caught at the write boundary and
+    # pinned by test_thalamus.TestFiledTrace).
 
     def test_extractor_sees_every_writer_file(self):
         """Every declared writer file yields at least one triple — or is a
@@ -670,16 +671,37 @@ class TestS0TurnClassification:
         ok, _ = validate_trace_event('s0', 'K', 'heartbeat')
         assert ok, "heartbeat must be a valid (s0, K) ref_type"
 
-    def test_only_user_message_is_conversational_today(self):
-        # Locks the decisions: operator prompts encode; anchor↔anchor and
-        # brain↔anchor are OFF until the encoder prompt is taught the
-        # correspondent elements; heartbeats never. Flipping a row is a
-        # deliberate change gated on that encoder work.
+    def test_the_dial_as_decided(self):
+        # Locks the decisions: operator prompts encode; the prompt reader's
+        # harness and subagent rows encode (each opens a turn holding my
+        # reply); anchor↔anchor and brain↔anchor stay OFF until their
+        # flip-day checklist clears; heartbeats never. Flipping a row is a
+        # deliberate change.
         from servers.trace_contract import S0_CONVERSATIONAL_INCOMING
         assert S0_CONVERSATIONAL_INCOMING['user_message'] is True
         assert S0_CONVERSATIONAL_INCOMING['self_message'] is False
         assert S0_CONVERSATIONAL_INCOMING['thalamus_delivery'] is False
+        assert S0_CONVERSATIONAL_INCOMING['env_message'] is True
+        assert S0_CONVERSATIONAL_INCOMING['subagent_message'] is True
         assert S0_CONVERSATIONAL_INCOMING['heartbeat'] is False
+
+    def test_every_dial_row_but_heartbeat_has_a_speaker(self):
+        # One speaker per incoming ref_type the dial can turn on; a heartbeat
+        # carries no message, so it has none. A correspondent added to the
+        # dial without a speaker would render under nobody's name.
+        from servers.trace_contract import (
+            INCOMING_SPEAKERS, S0_CONVERSATIONAL_INCOMING)
+        assert set(INCOMING_SPEAKERS) == set(S0_CONVERSATIONAL_INCOMING) - {'heartbeat'}
+        assert INCOMING_SPEAKERS['user_message'] == 'operator'
+        assert len(set(INCOMING_SPEAKERS.values())) == len(INCOMING_SPEAKERS)
+
+    def test_prompt_pieces_are_written_only_as_dial_on_rows(self):
+        from servers.trace_contract import (
+            CADENCE_REF_TYPES, S0_CONVERSATIONAL_INCOMING, SPEAKER_REF_TYPES)
+        assert all(S0_CONVERSATIONAL_INCOMING[rt] for rt in SPEAKER_REF_TYPES.values())
+        assert 'session' not in SPEAKER_REF_TYPES and 'brain' not in SPEAKER_REF_TYPES
+        assert all(S0_CONVERSATIONAL_INCOMING[rt] for rt in CADENCE_REF_TYPES)
+        assert 'env_message' not in CADENCE_REF_TYPES   # a notice never brings an encode due
 
     def test_operator_dialogue_is_a_subset_of_conversational(self):
         # Option A's safety property: every pinned consumer (presence,
@@ -702,11 +724,14 @@ class TestS0TurnClassification:
         ) + ('assistant_message',)
         assert CONVERSATIONAL_REF_TYPES == expected
 
-    def test_whitelist_unchanged_zero_behavior_guard(self):
-        # The get_session_turns whitelist must still be exactly the pre-refactor
-        # pair — guards the Phase-1 repoint as genuinely zero-behavior-change.
+    def test_whitelist_is_exactly_what_the_encoder_reads(self):
+        # The get_session_turns whitelist is what the encoder and the embed
+        # lockstep read: a ref_type entering it is a deliberate change. The
+        # prompt reader's harness and subagent rows are in it because each
+        # opens a turn that holds my reply.
         from servers.trace_contract import CONVERSATIONAL_REF_TYPES
-        assert set(CONVERSATIONAL_REF_TYPES) == {'user_message', 'assistant_message'}
+        assert set(CONVERSATIONAL_REF_TYPES) == {
+            'user_message', 'assistant_message', 'env_message', 'subagent_message'}
 
 
 # ═══════════════════════════════════════════════════════

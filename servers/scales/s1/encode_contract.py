@@ -46,10 +46,9 @@ def _resolve_encode_every() -> int:
 # is a LEVEL trigger on turns-since-last-encode (read live from traces), not a
 # modular counter — a skipped run (lock busy) isn't lost; the next turn re-checks.
 # Operator knob: BRAIN_ENCODE_EVERY in ~/.config/brain/env, read once at import
-# (daemon restart to apply). Ceiling ~10: the encoder is fed a flat "last 20
-# message rows" window (ENCODING_AGENT['max_messages'] — user+assistant, so ~10
-# turns), so a larger cadence leaves each cycle's oldest turns outside what the
-# Scribe ever reads. Raise both together, or accept the loss.
+# (daemon restart to apply). The encoder's window holds every turn since the
+# last encode (encode._window), so a larger cadence costs window size, not
+# coverage, up to ENCODING_AGENT['window_max_turns'].
 ENCODE_EVERY = _resolve_encode_every()
 
 # turns-since-last-encode at/above this means the Scribe is WEDGED: it should have
@@ -75,10 +74,10 @@ def scribe_is_starved(turns_since: int) -> bool:
 # A session that goes quiet below the ENCODE_EVERY threshold would otherwise
 # never have its last turns encoded (the 5+ trigger never fires, and the Stop
 # hook is gone). The poll-driven reactor catches that tail: once a session has
-# been idle this long AND has more than SCRIBE_TAIL_MIN_TURNS unencoded turns,
+# been idle this long AND has at least SCRIBE_TAIL_MIN_TURNS unencoded turns,
 # fire one final encode. An hour is long enough that it only ever fires on a
-# genuinely abandoned session; the >2-turns guard skips trivial tails not worth
-# a Sonnet call.
+# genuinely abandoned session; the turn floor skips a lone leftover turn, not
+# worth a Sonnet call.
 SCRIBE_TAIL_IDLE_SECONDS = 3600
 SCRIBE_TAIL_MIN_TURNS = 2
 
@@ -137,7 +136,7 @@ SCRIBE_HUNG_ALARM_SECONDS = 1800
 # caps DISTINCT sessions encoding at once, not re-encodes of one: per-session
 # single-flight rides on top in the daemon poll (_encode_inflight). Recall (Haiku)
 # is a separate rate bucket, so this is about process headroom, not Haiku's API
-# limit. 4 = headroom for parallel worktree streams without threatening recall
+# limit. 4 = headroom for parallel worktree sessions without threatening recall
 # latency (2026-07-28); revisit against the tier's Sonnet ITPM/OTPM if raised.
 MAX_CONCURRENT_ENCODES = 4
 
@@ -147,9 +146,15 @@ MAX_CONCURRENT_ENCODES = 4
 
 # Encoding agent v3.2 (Sonnet) — split node catalog + timeline with references
 ENCODING_AGENT = {
-    'message_content_limit': None,    # preserve the whole stored episode when gathering
     'message_display_limit': None,    # no additional per-message timeline cut
-    'max_messages': 20,               # last N messages (~10 turns)
+    # The conversation window (encode._window): every turn since the last
+    # encode, plus up to window_context_turns already-encoded turns before
+    # them, at most window_max_turns in all. E3 (eval/s1e_window_sizing.py,
+    # 233 production encodes 2026-10-12..19): the backlog since the last
+    # encode ran p50 5 / p90 17 / p99 38 / max 81 turns; 40 holds 99%, and a
+    # bigger backlog keeps the newest turns and logs s1e_window_capped.
+    'window_max_turns': 40,
+    'window_context_turns': 2,
     'max_rounds': 5,                  # Sonnet API round limit (target: 2-3)
     'max_tokens': 20000,              # output cap per round; thinking counts against it on models that think by default
     'session_context_limit': 800,     # session context chars (additive within session, editable by S2)
@@ -193,18 +198,6 @@ ENCODING_TOOLS = frozenset({
     'remember_batch', 'revise_batch', 'brain_batch', 'connect_batch',
     'recall_batch', 'get_nodes',
 })
-
-# Lived-sequence timeline (S1E code-half piece 1): how many recent s0 events to
-# pull when assembling the messages+actions interleave. Bounded by EPISODE_MAX_LIMIT
-# (=500) — recall_episodes/filter_events clamps anything larger — so 500 IS the max
-# a single pull can return; the result is then trimmed to the window's turn count
-# (encode._window_n_turns).
-LIVED_SEQUENCE_PULL = 500
-
-# Window-size fallback when the hook window carries no user rows — shared by
-# every consumer of the window rule (encode._window_n_turns is the one
-# derivation site: timeline render, catalog cutoff, associated-stub seeds).
-WINDOW_TURNS_FALLBACK = 20
 
 
 # ═══════════════════════════════════════════════════════════════

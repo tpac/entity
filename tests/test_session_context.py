@@ -29,10 +29,33 @@ class TestSessionContextCreation:
         assert len(ctx.session_id) > 0
 
     def test_session_id_short(self):
-        """Short form for chain IDs — first 8 chars."""
+        """Short form for chain IDs — the last 12 hyphen-free chars; for a
+        UUID that is exactly its last group."""
         from servers.session_context import SessionContext
-        ctx = SessionContext(session_id='abcdef1234567890')
-        assert ctx.session_short == 'abcdef12'
+        ctx = SessionContext(session_id='01a122b6-9059-7ca1-bb1b-a5e6ff4ce0cf')
+        assert ctx.session_short == 'a5e6ff4ce0cf'
+
+    def test_uuidv7_same_minute_chains_differ(self):
+        """Codex ids are UUIDv7: two chats opened in the same minute share
+        their first 8 chars (the timestamp). Their chains must not."""
+        from servers.session_context import SessionContext
+        a = SessionContext('01a122b6-9059-7ca1-bb1b-a5e6ff4ce0cf', stop_counter=3)
+        b = SessionContext('01a122b6-f3c2-7d10-8e4a-17c09b2d5e61', stop_counter=3)
+        assert a.session_id[:8] == b.session_id[:8]
+        for gen in ('s0_chain', 's1r_chain', 's1e_chain'):
+            assert getattr(a, gen)() != getattr(b, gen)()
+
+    def test_short_strips_hyphens_before_cutting(self):
+        """Chain parsers split on '-', so the short never carries one — even
+        when the cut would land inside a non-UUID id. Shorter ids come back
+        whole."""
+        from servers.session_context import SessionContext
+        from servers.scales.s1.trace_links import _stop_of
+        ctx = SessionContext('i1a2b3c-e47becba-s0', stop_counter=7)
+        assert '-' not in ctx.session_short
+        assert ctx.s0_chain().split('-') == ['s0', ctx.session_short, '7']
+        assert _stop_of(ctx.s1e_chain()) == 7
+        assert SessionContext('sess-1').session_short == 'sess1'
 
     def test_stop_counter(self):
         """SessionContext carries stop counter."""
@@ -546,13 +569,13 @@ class TestSessionContextInTraces:
         ctx = SessionContext(session_id='abcdef1234567890', stop_counter=42)
 
         s0_chain = ctx.s0_chain()
-        assert s0_chain == 's0-abcdef12-42'
+        assert s0_chain == 's0-ef1234567890-42'
 
         s1r_chain = ctx.s1r_chain()
-        assert s1r_chain == 's1r-abcdef12-42'
+        assert s1r_chain == 's1r-ef1234567890-42'
 
         s1e_chain = ctx.s1e_chain()
-        assert s1e_chain == 's1e-abcdef12-42'
+        assert s1e_chain == 's1e-ef1234567890-42'
 
     def test_trace_write_with_context(self):
         """Trace events use session_id from context."""
@@ -641,7 +664,7 @@ class TestSessionContextReplacesSingleton:
         assert chains_b[0]['events'][0]['summary'] == 'from B'
 
     def test_empty_session_id_raises(self):
-        """No session id means no session state — never another stream's."""
+        """No session id means no session state — never another session's."""
         with pytest.raises(ValueError):
             self.brain.get_or_create_session('')
         with pytest.raises(ValueError):

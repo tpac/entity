@@ -26,21 +26,30 @@ SURFACE_GRACE_MINUTES = 1
 SURFACE_MISSED_TURNS = 2
 
 
-def _check_daemon() -> dict:
-    """TCP ping the daemon, through the dashboard's one client.
+def daemon_record() -> dict:
+    """The dashboard's one view of the daemon, from its ping — the status
+    card, the stats bar's encode chip and the Config tab all read this record
+    rather than mapping ping fields themselves.
 
-    Through `daemon_send`, which returns exactly this payload and takes a
+    Through `daemon_send`, which returns exactly the ping payload and takes a
     timeout — a hand-rolled socket here would miss the newline framing the
     module's client has. `uptime_seconds` is the loaded code image's age,
     from dispatch_ops._handle_ping — an in-place reload resets it while the
-    PID stays the same."""
-    result = daemon_send("ping", timeout=2)
+    PID stays the same. `db_dir` is the brain the daemon actually writes;
+    `encode_every` the Scribe cadence it read at start. {'alive': False}
+    with an error when the daemon does not answer within 3 s — long enough
+    for a daemon mid-dispatch to answer, short enough for the 5 s status
+    poll; the stats bar carried this value before the record was shared."""
+    result = daemon_send("ping", timeout=3)
     if result is None:
         return {'alive': False, 'error': 'no response'}
     return {
         'alive': True, 'pid': result.get('pid', '?'),
         'uptime': result.get('uptime_seconds', 0),
-        'code_fingerprint': result.get('code_fingerprint', '')[:12],
+        'code_fingerprint': (result.get('code_fingerprint') or '')[:12],
+        'db_dir': result.get('db_dir') or '',
+        'source_dir': result.get('source_dir') or '',
+        'encode_every': result.get('encode_every'),
     }
 
 
@@ -156,7 +165,7 @@ def check_system_status() -> dict:
     `_check_X()` + one dict entry below.
     """
     return {
-        'daemon':   _check_daemon(),
+        'daemon':   daemon_record(),
         'brain_db': _check_brain_db(),
         'logs_db':  _check_logs_db(),
         'surface':  _check_surface(),

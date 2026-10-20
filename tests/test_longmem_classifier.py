@@ -4,6 +4,7 @@ Covers:
 - _extract_key_terms: tokenization discipline (digits, significant words, stopwords)
 - _scan_brain_for_gold: ground-truth scan against a real BrainTestBase brain
 - _bucket: all branches with synthetic scan + trace dicts (no LLM calls)
+- _recall_relevant_nodes: gold-seeded diagnostic recall on a seeded brain
 - Backward-compat: classify_failure integration smoke test
 
 The _context_has_gold Haiku call is stubbed for bucket-logic tests — we only
@@ -218,6 +219,34 @@ class TestBucketLogic(unittest.TestCase):
             b = classifier._bucket(scan, self._trace(), True, False,
                                    question="q", gold="g")
         self.assertEqual(b, "RECALL_MISS")
+
+
+class TestRecallRelevantNodes(BrainTestBase):
+    """The diagnostic behind evidence.relevant_to_gold, through Brain.recall's
+    real signature (limit=, dict result). needs_embedder=True: the template
+    carries document vectors, the model encodes the gold query."""
+
+    needs_embedder = True
+
+    def test_returns_gold_bearing_node_without_marking_access(self):
+        nid = self.brain.remember(
+            type="fact", title="Zithromax dose",
+            content="500mg zithromax daily for 5 days was prescribed.")["id"]
+        # Count calls to _mark_accessed — the thing mark_accessed governs.
+        # The access table is drained by a background worker, so asserting
+        # on it races (see tests/test_recall_mark_accessed.py).
+        marked = []
+        with patch.object(type(self.brain), "_mark_accessed",
+                          lambda _self, node_id, session_id, ctx=None:
+                          marked.append(node_id)):
+            out = classifier._recall_relevant_nodes(
+                self.brain, "500mg zithromax daily")
+        by_id = {n["id"]: n for n in out}
+        self.assertIn(nid[:8], by_id,
+                      "gold-bearing node missing from %r" % list(by_id))
+        self.assertGreater(by_id[nid[:8]]["score"], 0.0)
+        self.assertEqual(marked, [],
+                         "a diagnostic recall marked %d node(s)" % len(marked))
 
 
 class TestClassifyFailureIntegration(BrainTestBase):

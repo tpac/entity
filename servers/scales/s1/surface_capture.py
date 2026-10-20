@@ -1,5 +1,5 @@
 """Production capture at the Haiku boundary — the corpus source for the
-surface prompt A/B replay bench (eval/agent_introspect/surface_replay.py).
+surface A/B replay bench (eval/surface_capture_ab.py).
 
 Every production recall writes one self-contained JSON file: the structured
 inputs to build_surface_prompt, the rendered prompt actually sent (byte
@@ -88,10 +88,29 @@ def capture_dir(brain=None):
     return os.path.join(base, 'surface_captures')
 
 
-def begin(brain, *, candidates_data, user_message, recent_messages,
+def _slim_turns(turns):
+    """The window as the render reads it: each row's speaker key, full text
+    (flat `content`, which trace_contract.row_text reads first) and
+    surfaced ids, plus its id, chain and time for reading a capture back —
+    not the whole trace record, whose metadata repeats the text."""
+    from servers.trace_contract import row_text
+
+    def slim(row):
+        if row is None:
+            return None
+        out = {k: row[k] for k in ('id', 'ref_type', 'chain_id', 'created_at',
+                                   'surfaced') if k in row}
+        out['content'] = row_text(row)
+        return out
+    return [{'user': slim(t['user']), 'with': [slim(r) for r in t['with']],
+             'assistant': slim(t['assistant']),
+             'actions': [slim(r) for r in t['actions']]} for t in turns or []]
+
+
+def begin(brain, *, candidates_data, user_message, recent_turns,
           retrieval_stats, frame, layout,
           surface_instructions, interaction_stamp,
-          user_content, max_tokens, variant, model, session_id,
+          user_content, max_tokens, variant, model, effort, session_id,
           shuffle_seed=None, scope=None):
     """Snapshot everything known at the Haiku call boundary.
 
@@ -124,11 +143,12 @@ def begin(brain, *, candidates_data, user_message, recent_messages,
                 'layout': layout,
                 'variant': variant,
                 'model': model,
+                'effort': effort,
                 'schema_sha': _schema_sha(),
             },
             'inputs': {
                 'user_message': user_message,
-                'recent_messages': recent_messages,
+                'recent_turns': _slim_turns(recent_turns),
                 'retrieval_stats': retrieval_stats,
                 'frame': frame,
                 'candidates_pre_tools': copy.deepcopy(candidates_data),

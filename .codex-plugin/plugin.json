@@ -1,6 +1,6 @@
 {
   "name": "entity",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Memory for Claude Code and Codex. It keeps a record of its conversations, turns them into memories it recalls in later sessions, and keeps corrections attached to what they corrected. Runs on your machine. Requires your own Anthropic API key.",
   "keywords": [
     "identity",
@@ -31,7 +31,7 @@
   "interface": {
     "displayName": "Entity",
     "shortDescription": "Memory for Claude Code and Codex that carries across sessions. Requires an Anthropic API key.",
-    "longDescription": "Memory for Claude Code and Codex. It keeps a record of its conversations, turns them into memories it recalls in later sessions, and keeps corrections attached to what they corrected. Runs on your machine. Requires your own Anthropic API key. Version 0.9 works with Codex but isn't optimized for Codex yet.",
+    "longDescription": "Memory for Claude Code and Codex. It keeps a record of its conversations, turns them into memories it recalls in later sessions, and keeps corrections attached to what they corrected. Runs on your machine. Requires your own Anthropic API key. It works with Codex but isn't optimized for Codex yet.",
     "developerName": "Tom Pachys",
     "category": "Other",
     "websiteUrl": "https://github.com/tpac/entity"

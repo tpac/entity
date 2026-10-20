@@ -20,14 +20,14 @@ from tests.isolated_brain import brain_env
 
 
 class TestS0ToS1EGather(unittest.TestCase):
-    """S0 trace write -> S1E _gather_messages reads.
+    """S0 trace write -> the S1E window reads.
 
     The S0 hooks write user_message and assistant_message traces.
-    The S1 encoder reads them via get_session_turns().
+    The S1 encoder reads them via brain.conversation_turns (encode._window).
     If the ref_types or metadata shape change, this breaks silently.
     """
 
-    def test_s0_traces_feed_gather_messages(self):
+    def test_s0_traces_feed_the_encoder_window(self):
         with brain_env() as env:
             session_id = 'test-okd-s0-s1e'
             chain_id = 's0-test-1'
@@ -46,15 +46,16 @@ class TestS0ToS1EGather(unittest.TestCase):
                 metadata={'content': 'Clerk is a user management platform.'},
                 session_id=session_id)
 
-            # S1E reads via get_session_turns
-            from servers.scales.s1.encode import _gather_messages
-            messages = _gather_messages(env.brain, session_id)
+            # S1E reads its window through the turn reader
+            from servers.scales.s1.encode import _window
+            from servers.trace_contract import row_text
+            turns = _window(env.brain, session_id)
 
-            self.assertEqual(len(messages), 2)
-            self.assertEqual(messages[0]['role'], 'user')
-            self.assertIn('Clerk', messages[0]['content'])
-            self.assertEqual(messages[1]['role'], 'assistant')
-            self.assertIn('Clerk', messages[1]['content'])
+            self.assertEqual(len(turns), 1)
+            self.assertEqual(turns[0]['user']['ref_type'], 'user_message')
+            self.assertIn('Clerk', row_text(turns[0]['user']))
+            self.assertEqual(turns[0]['assistant']['ref_type'], 'assistant_message')
+            self.assertIn('Clerk', row_text(turns[0]['assistant']))
 
 
 class TestJudgeOutputToNodeCatalog(unittest.TestCase):

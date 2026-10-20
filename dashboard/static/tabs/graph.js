@@ -25,7 +25,7 @@
 // operator clicked it. NOTHING lights on a timer. An idle brain looks idle;
 // the slow global `breath` and the camera's drift are the only motion that
 // isn't caused by something real.
-// Each activation wave is tinted by the STREAM that caused it (shared palette
+// Each activation wave is tinted by the SESSION that caused it (shared palette
 // with lib/sessions.js), so several sessions thinking at once stay tellable
 // apart. A pinned recall or encode lights its memories where they live, with
 // their names and the edges among them; hovering a star names it and draws
@@ -41,7 +41,7 @@ import { api } from '/static/lib/api.js';
 import bus from '/static/lib/bus.js';
 import { escapeHtml } from '/static/lib/dom.js';
 import { loadNodeDetail } from '/static/lib/node_detail.js';
-import { STREAM_RGB, sessionHueIndex } from '/static/lib/sessions.js';
+import { SESSION_RGB, sessionHueIndex } from '/static/lib/sessions.js';
 
 // ── aspect palette ──
 // Colour slot (HUE / sprite index) per aspect. Which aspect a node type or a
@@ -428,16 +428,16 @@ function mulberry(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1
 function randn(R){let u=0,v=0;while(!u)u=R();while(!v)v=R();return Math.sqrt(-2*Math.log(u))*Math.cos(6.2831853*v);}
 
 // ── projection + render ──
-let sx,sy,sp,sz,order,fired,hop,tender,streamOf;
+let sx,sy,sp,sz,order,fired,hop,tender,sessionOf;
 function allocScreen(N){ sx=new Float32Array(N);sy=new Float32Array(N);sp=new Float32Array(N);sz=new Float32Array(N);
   order=new Int32Array(N); for(let i=0;i<N;i++)order[i]=i; act=new Float32Array(N); fired=new Uint8Array(N);
   hop=new Int8Array(N); hop.fill(-1); tender=new Float32Array(N);
-  // Which stream of thought lit this node. Several streams think at once, and
+  // Which session lit this node. Several sessions think at once, and
   // an untinted bloom makes three simultaneous sessions look like one. Index
   // into the SAME palette lib/sessions.js gives the feed, so a wave in the
-  // galaxy is visibly the stream whose activity is scrolling beside it.
-  // 255 = "no stream" (nothing lit it, or the event carried no session).
-  streamOf=new Uint8Array(N); streamOf.fill(255);
+  // galaxy is visibly the session whose activity is scrolling beside it.
+  // 255 = "no session" (nothing lit it, or the event carried no session).
+  sessionOf=new Uint8Array(N); sessionOf.fill(255);
   front=[]; _tierAt=new Int8Array(N).fill(-1); _spotDirty=true;
   _hov=null; _hovIdx=-1; _hovShow=-1; _hovT=0; _titleT=0; _tipFor=-1;
   hoverIdx=-1; }   // a rebuilt graph re-indexes its stars; an old index names the wrong one, or none
@@ -466,7 +466,7 @@ function matches(i){ if(!_searchQuery) return true; const q=_searchQuery;
 
 const MAXHOP=4;   // a recall lights a bounded neighbourhood, not the whole brain
 function seed(i,hue){ if(i<0||i>=G.N)return; act[i]=Math.max(act[i],1); fired[i]=1; hop[i]=0;
-  if(hue!=null&&hue>=0) streamOf[i]=hue;
+  if(hue!=null&&hue>=0) sessionOf[i]=hue;
   if(front.indexOf(i)<0)front.push(i); }
 // A recall spreads like a signal firing through a network: a lit node CHARGES its
 // fresh neighbours up over ~0.7s until they ignite and pass it on, out to MAXHOP
@@ -479,15 +479,15 @@ function stepActivation(dt){ if(!front.length)return; const nf=[], add=new Map()
     if(a>0.12 && hi<MAXHOP && nb.length){ const cap=Math.min(nb.length,5), h=hi+1;
       for(let k=0;k<cap;k++){ const j=nb[k]; if(!fired[j]){ add.set(j,(add.get(j)||0)+a*4.0*dt/cap);
         if(!hm.has(j)||hm.get(j)>h) hm.set(j,h);
-        // The wave carries its stream outward — a spreading thought stays the
+        // The wave carries its session outward — a spreading thought stays the
         // color of whoever is thinking it.
-        if(streamOf[i]!==255) sm.set(j,streamOf[i]); } } }
+        if(sessionOf[i]!==255) sm.set(j,sessionOf[i]); } } }
     if(G.A[i]===6 && a>0.35) tender[i]=1;    // where I was wrong stays tender
     act[i]*=decay;
-    if(act[i]>0.03) nf.push(i); else { fired[i]=0; hop[i]=-1; streamOf[i]=255; }   // cooled → re-armable next wave
+    if(act[i]>0.03) nf.push(i); else { fired[i]=0; hop[i]=-1; sessionOf[i]=255; }   // cooled → re-armable next wave
   }
   for(const [j,v] of add){ act[j]=Math.min(1,act[j]+v); if(hop[j]<0) hop[j]=hm.get(j);
-    if(sm.has(j)) streamOf[j]=sm.get(j);
+    if(sm.has(j)) sessionOf[j]=sm.get(j);
     if(act[j]>0.6) fired[j]=1; if(nf.indexOf(j)<0)nf.push(j); }
   front=nf.slice(0,2500); }
 
@@ -584,10 +584,10 @@ function frame(now){ if(!G||!ctx){raf=0;return;}
     const s=(1.5+2.5*young+g.D[i]*10+ac*ac*24)*pe*1.7*_boost;
     ctx.globalAlpha=Math.min(0.4,(0.03+0.13*g.L[i])*br*(0.45+0.55*depth)+ac*0.34)*(dim?0.16:1)*hd;
     ctx.drawImage(ac>0.2?WHITE:SPR[g.A[i]],sx[i]-s,sy[i]-s,s*2,s*2); }
-  // firing bloom — the crest of a thought, in the color of the stream thinking it
+  // firing bloom — the crest of a thought, in the color of the session thinking it
   for(let x=0;x<front.length;x++){const i=front[x],ac=act[i];if(ac<0.12)continue;const pe=sp[i],s=(3+ac*15)*pe;
     ctx.globalAlpha=Math.min(0.55,ac*0.65);
-    ctx.drawImage(g.A[i]===6?RED:streamSprite(streamOf[i]),sx[i]-s,sy[i]-s,s*2,s*2);}
+    ctx.drawImage(g.A[i]===6?RED:sessionSprite(sessionOf[i]),sx[i]-s,sy[i]-s,s*2,s*2);}
   // tenderness — where I was wrong stays a little warm, always
   for(let i=0;i<g.N;i++){ const td=tender[i]; if(td<0.02)continue; const pe=sp[i],s=(2+g.D[i]*3)*pe;
     ctx.globalAlpha=Math.min(0.2,td*0.14); ctx.drawImage(RED,sx[i]-s,sy[i]-s,s*2,s*2); }
@@ -599,7 +599,7 @@ function frame(now){ if(!G||!ctx){raf=0;return;}
     const hb=(_hov&&_hov[i])?1+0.5*_hovT:1;
     const s=(coreR(i)+ac*4)*0.6*pe*(tk>=0?1.5:1)*_boost*hb;
     let spr,al;
-    if(ac>0.15){spr=g.A[i]===6?RED:streamSprite(streamOf[i]);al=(0.4+0.55*ac)*(0.45+0.55*depth);}
+    if(ac>0.15){spr=g.A[i]===6?RED:sessionSprite(sessionOf[i]);al=(0.4+0.55*ac)*(0.45+0.55*depth);}
     else if(tk>=0){ spr=tierSprite(TIERS[tk].rgb); al=(0.55+0.4*depth);}
     else{spr=colorMode===0?SPR[g.A[i]]:(heat>0.62?WHITE:SPR[3]);
       al=(colorMode===0?(0.14+0.22*young+0.6*g.L[i])*br:(0.12+0.8*hh))*(0.45+0.55*depth);}
@@ -648,12 +648,12 @@ function frame(now){ if(!G||!ctx){raf=0;return;}
 
 const _tierSprites={};
 function tierSprite(c){ const k=c.join(','); if(!_tierSprites[k])_tierSprites[k]=sprite(c[0],c[1],c[2]); return _tierSprites[k]; }
-// Firing color per stream. 255 (untagged) falls back to the neutral white
+// Firing color per session. 255 (untagged) falls back to the neutral white
 // flash, so a recall with no session — an internal one — still reads as fired.
-const _streamSprites={};
-function streamSprite(h){ if(h===255||h>=STREAM_RGB.length) return WHITE;
-  if(!_streamSprites[h]){ const c=STREAM_RGB[h]; _streamSprites[h]=sprite(c[0],c[1],c[2]); }
-  return _streamSprites[h]; }
+const _sessionSprites={};
+function sessionSprite(h){ if(h===255||h>=SESSION_RGB.length) return WHITE;
+  if(!_sessionSprites[h]){ const c=SESSION_RGB[h]; _sessionSprites[h]=sprite(c[0],c[1],c[2]); }
+  return _sessionSprites[h]; }
 
 // ── picking + tooltip ──
 function nearest(mx,my){ if(!G)return-1; let best=-1,bd=18*18;
@@ -768,14 +768,14 @@ export function setShape(name){
 }
 
 /** Re-lay G out from `raw`, keeping what is lit: rebuilding reallocates the
- *  activation arrays, so carry the live values — and the stream each wave
+ *  activation arrays, so carry the live values — and the session each wave
  *  belongs to — across by node id. */
 function _rebuild(){
   const carried=[];
-  if(G){ for(let i=0;i<G.N;i++) if(act[i]>0.02||tender[i]>0.02) carried.push([G.IDS[i],act[i],tender[i],streamOf[i]]); }
+  if(G){ for(let i=0;i<G.N;i++) if(act[i]>0.02||tender[i]>0.02) carried.push([G.IDS[i],act[i],tender[i],sessionOf[i]]); }
   G=buildGalaxy(raw);
   allocScreen(G.N); needSort=true;
-  for(const [id,a,td,st] of carried){ const i=G.idIndex.get(id); if(i!=null){ act[i]=a; tender[i]=td; streamOf[i]=st; if(a>0.12) front.push(i); } }
+  for(const [id,a,td,st] of carried){ const i=G.idIndex.get(id); if(i!=null){ act[i]=a; tender[i]=td; sessionOf[i]=st; if(a>0.12) front.push(i); } }
   sizeCanvas();
 }
 

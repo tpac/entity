@@ -41,7 +41,7 @@ WRITE_OK = {'append', 'append_batch', 'store_embeddings', 'set_identity'}
 
 # (servers-relative path, method) → why. Exact allowlist; anything else fails.
 READ_EXCEPTIONS = {
-    # (present_streams/session_activity moved INTO brain_traces.py 2026-08-07
+    # (present_sessions/session_activity moved INTO brain_traces.py 2026-08-07
     # — the presence-door exception for brain.py is retired, not relocated.)
     ('recall_laf.py', 'event_vector_rows'): 'LAF episodic matrix vector substrate',
     ('embed_queue.py', 'find_unembedded'): 'embedding reconciliation scan',

@@ -14,7 +14,8 @@ import time
 
 from servers.scales.dispatch import load_env
 from servers.scales.runner import run_llm_loop
-from servers.trace_contract import build_delta_metadata, interaction_fields
+from servers.trace_contract import (build_delta_metadata, interaction_fields,
+                                    session_short)
 
 
 def scribe_journal_kwargs(session_id):
@@ -82,12 +83,12 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     if not session_id:
         raise ValueError("session_id is required")
 
-    # 1. Gather messages (S1-specific: reads from traces)
-    messages = _gather_messages(brain, session_id)
-    _step("messages(%d)" % len(messages))
-    if not messages:
-        _log("no messages, skipping")
-        return {"skipped": True, "reason": "no messages"}
+    # 1. The conversation window (S1-specific: reads from traces)
+    turns = _window(brain, session_id)
+    _step("turns(%d)" % len(turns))
+    if not turns:
+        _log("no turns, skipping")
+        return {"skipped": True, "reason": "no turns"}
 
     # View policy and the associated-stubs flag (encoder_view.py): resolved
     # ONCE per run and threaded down (env read is non-atomic across call
@@ -101,7 +102,7 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     # Conversation time, resolved ONCE per run (like the view flag above) —
     # the catalog's relative headers and the timeline's now/age stamps must
     # agree on the instant.
-    view_now = _conversation_now_safe(brain, session_id, messages) if view else None
+    view_now = _conversation_now_safe(brain, session_id, turns) if view else None
 
     # 2. Build prompt. Each learnable boundary resolves ONCE per run —
     # template, config and stamp from one read — so the delta records the K
@@ -134,13 +135,13 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     # 2a. Catalog first, then the body — the two halves profile separately
     # and the body reuses the catalog's trace streams.
     catalog_text, catalog_ids, streams = _build_catalog(
-        brain, messages, session_id, view_policy=view, now=view_now,
+        brain, turns, session_id, view_policy=view, now=view_now,
         associated_stubs=stubs)
     _step("catalog(%d ids)" % len(catalog_ids))
 
     # 2b. Body assembly: the XML lived-sequence timeline.
     user_preamble, user_content, _cat_text2, _cat_ids2 = _build_user_content(
-        brain, messages, counter, session_id, gist=gist,
+        brain, turns, counter, session_id, gist=gist,
         precomputed=(catalog_text, catalog_ids, streams), view_policy=view,
         view_now=view_now, journal=journal)
     _step("prompt(preamble=%d chars, body=%d chars)" % (
@@ -154,12 +155,13 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     # post-hoc eval read it back by pointer/chain; per-arm eval brains land
     # it inside their own db_dir by construction). The O trace below carries
     # the returned db_dir-relative pointer as its ref_id.
-    enc_chain = 's1e-%s-%d' % (session_id[:8], counter)
+    from servers.session_context import SessionContext
+    enc_chain = SessionContext(session_id, stop_counter=counter).s1e_chain()
     prompt_pointer = brain.record_payload(
         enc_chain, 'prompt', user_preamble + "\n\n" + user_content)
 
     # 5. Write S1 traces: O (observation) and K (knowledge)
-    _write_pre_traces(brain, dispatch_fn, messages, user_content, counter,
+    _write_pre_traces(brain, dispatch_fn, turns, user_content, enc_chain,
                       session_id, enc_stamp, catalog_ids=catalog_ids,
                       prompt_pointer=prompt_pointer)
 
@@ -195,7 +197,7 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
         brain._log_error('s1e_run_failed', e,
                          'session=%s stop=%d — LLM loop failed; writes from '
                          'completed rounds (if any) are kept, turns stay '
-                         'unencoded and will retry' % (session_id[:8], counter))
+                         'unencoded and will retry' % (session_short(session_id), counter))
         # Salvage the actions that ran before the failure (RunLoopError
         # carries them). Bounding + record shape live in the traces layer
         # (build_failed_run_metadata) — this consumer just hands them over.
@@ -214,7 +216,7 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
                 'summary': 'FAILED: %s' % str(e)[:200],
                 'metadata': build_failed_run_metadata(
                     error=e, stop_counter=counter,
-                    inputs_processed=len(messages), interaction=enc_stamp,
+                    inputs_processed=len(turns), interaction=enc_stamp,
                     partial_actions=getattr(e, 'partial_actions', None),
                     payload_pointer=failed_ptr),
                 'session_id': session_id,
@@ -250,14 +252,14 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
             'undispatched_tool_calls',
             'max_rounds exhausted — last reply\'s tool call(s) not run: %s'
             % ', '.join(result['undispatched_tool_calls']),
-            'unit=s1e session=%s stop=%d' % (session_id[:8], counter))
+            'unit=s1e session=%s stop=%d' % (session_short(session_id), counter))
     for failure in result.get('annotation_errors') or ():
         brain._log_error(
             's1e_reply_annotation_failed',
             RuntimeError('%s reply annotation failed: %s'
                          % (failure['tool'], failure['error'])),
             'the reply reached the encoder without its notes; '
-            'session=%s stop=%d' % (session_id[:8], counter))
+            'session=%s stop=%d' % (session_short(session_id), counter))
 
     # Oversized-tool-result scan — the runner truncates and marks the action
     # (it has no brain reference); the loud errors-table entry lands here.
@@ -267,8 +269,9 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
                 's1e_oversized_tool_result',
                 RuntimeError('%s returned %d chars — truncated to cap' % (
                     a.get('tool'), a.get('result_chars', -1))),
-                'head: %s; session=%s stop=%d' % (
-                    (a.get('result_head') or '')[:200], session_id[:8], counter))
+                'session=%s stop=%d; head: %s' % (
+                    session_short(session_id), counter,
+                    (a.get('result_head') or '')[:200]))
 
     # 7. Post-process (S1-specific: the residue). Guarded as a whole: the
     # loop's writes already landed — a post-process failure (e.g. `database
@@ -278,7 +281,7 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     with brain.loud('s1e_postprocess',
                     'journal/arc post-process failed — writes intact, '
                     'continuing to delta trace; session=%s stop=%d'
-                    % (session_id[:8], counter)):
+                    % (session_short(session_id), counter)):
         # The `## Review` note contract, SESSION-BOUND: write_journal_notes
         # extracts the fence + writes one journal_note trace per note, all
         # sharing enc_chain (this run); session_id walls continuity to this
@@ -297,9 +300,9 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
     # loud, and post-process failures above can't reach it.
     # Outcomes: count write actions by tool (remember / revise / connect / …).
     with brain.loud('s1e_delta_write',
-                    'encoding_run delta lost — run shows 0 actions on '
-                    'dashboard, coverage attribution falls to next run; '
-                    'session=%s stop=%d' % (session_id[:8], counter)):
+                    'session=%s stop=%d: encoding_run delta lost — run shows '
+                    '0 actions on dashboard, coverage attribution falls to '
+                    'next run' % (session_short(session_id), counter)):
         action_details = result.get('action_details', [])
         outcomes = {}
         for a in action_details:
@@ -316,7 +319,7 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
             actions=result.get('actions', 0),
             write_actions=result.get('write_actions', 0),
             rounds=result.get('rounds', 0),
-            inputs_processed=len(messages),
+            inputs_processed=len(turns),
             outcomes=outcomes,
             action_details=action_details,
             read_calls=result.get('read_calls', []),
@@ -364,27 +367,50 @@ def run_encoding(brain, dispatch_fn, counter, session_id, log_fn=None,
 # ── S1-Specific Helpers ──
 
 
-def _gather_messages(brain, session_id):
-    """Fetch recent messages for the current session via the traces layer.
+def _window(brain, session_id, older_than=None):
+    """The encoder's conversation window: every turn new since this session's
+    last successful encode started (brain.last_encode_anchor, the instant the
+    Scribe cadence counts from), plus up to ENCODING_AGENT
+    ['window_context_turns'] already-encoded turns before them, so the first
+    new turn's referent is in view. A turn is new when any of its incoming
+    rows arrived after the anchor: a message typed into a turn that opened
+    before it is still the operator's new words. One read
+    (brain.conversation_turns) serves the timeline, the catalog cutoff, the
+    associated-stub seeds and the catalog's surfaced ids. [] when nothing is
+    new — the run has nothing to encode.
 
-    Returns: [{role, trace_id, content, timestamp, judge_output}] — `trace_id`
-    (hex) is the load-bearing reference the encoder copies into source_refs.
-    Uses brain.get_conversation() — single source of truth.
-    """
+    At most ENCODING_AGENT['window_max_turns'] turns. A backlog past it keeps
+    the newest and logs s1e_window_capped with the count left out — never
+    silent. `older_than`: the window as of that instant (an eval replaying a
+    past run). Raises on a read failure: the timeline IS the input, so the run
+    fails and the next due cycle retries it."""
     from servers.scales.s1.encode_contract import ENCODING_AGENT
-    limit = ENCODING_AGENT['max_messages']
-    content_limit = ENCODING_AGENT['message_content_limit']
+    from servers.trace_contract import turn_incoming, turn_opened_at
+    cap = ENCODING_AGENT['window_max_turns']
+    since = brain.last_encode_anchor(session_id, older_than=older_than)
 
-    try:
-        turns = brain.get_conversation(session_id, limit=limit)
-        if turns:
-            for t in turns:
-                t['content'] = (t.get('content', '') or '')[:content_limit]
-            return turns
-    except Exception as e:
-        print('[s1e] CONVERSATION READ ERROR: %s' % e, flush=True)
+    def new(turn):
+        stamps = [r.get('created_at') or '' for r in turn_incoming(turn)]
+        return max(stamps or [turn_opened_at(turn)]) > since
 
-    return []
+    turns = brain.conversation_turns(session_id, cap, with_actions=True,
+                                     with_judge_output=True, older_than=older_than)
+    first = next((i for i, t in enumerate(turns) if new(t)), len(turns))
+    if first == len(turns):
+        return []
+    if first == 0:
+        # Every turn read is new, so the backlog may run past the read.
+        left_out = sum(1 for t in brain.conversation_turns(
+            session_id, cap, older_than=turn_opened_at(turns[0])) if new(t))
+        if left_out:
+            brain._log_error(
+                's1e_window_capped',
+                ValueError('session %s has more unencoded turns than the '
+                           'window holds' % session_short(session_id)),
+                '%s%d unencoded turns left out (window_max_turns=%d); the '
+                'newest are encoded' % ('at least ' if left_out >= cap else '',
+                                        left_out, cap))
+    return turns[max(0, first - ENCODING_AGENT['window_context_turns']):]
 
 
 def _build_system_prompt(prompt_instructions, journal=None):
@@ -417,7 +443,7 @@ def _build_system_prompt(prompt_instructions, journal=None):
     return prompt
 
 
-def _build_catalog(brain, messages, session_id, view_policy=False, now=None,
+def _build_catalog(brain, turns, session_id, view_policy=False, now=None,
                    associated_stubs=None):
     """The catalog half of the encoding input, built before the body so
     run_encoding can profile the two halves separately. Gathers the trace
@@ -429,7 +455,8 @@ def _build_catalog(brain, messages, session_id, view_policy=False, now=None,
     Returns (node_catalog, cataloged_ids, streams)."""
     from servers.scales.s1.encode_contract import build_node_catalog
 
-    judge_outputs = [m.get("judge_output") for m in messages if m.get("role") == "user"]
+    from servers.trace_contract import turn_incoming
+    judge_outputs = [r.get("judge_output") for t in turns for r in turn_incoming(t)]
 
     streams, extra_ids = None, None
     try:
@@ -453,37 +480,25 @@ def _build_catalog(brain, messages, session_id, view_policy=False, now=None,
         streams, extra_ids = None, None
 
     if view_policy and now is None:
-        now = _conversation_now_safe(brain, session_id, messages)
+        now = _conversation_now_safe(brain, session_id, turns)
 
     if associated_stubs is None:
         from servers.scales.s1.encoder_view import associated_stubs_enabled
         associated_stubs = associated_stubs_enabled()
     stubs_on = associated_stubs
 
-    # One window pull shared by the catalog cutoff and the stub seeds — the
-    # timeline render keeps its own (the pre-existing pair); this block must
-    # not add a third. Quiet degrade mirrors window_first_turn's contract:
-    # no readable window → no cutoff, no seeds.
-    turns = None
-    if view_policy or stubs_on:
-        try:
-            turns = _lived_turns(brain, session_id, _window_n_turns(messages))
-        except Exception:
-            turns = None
-
     # Window-aligned cutoff (arm D): the catalog ages against the same turn
     # window the timeline renders — widen the chat window and the full-depth
     # catalog widens with it. None (no datable head, or flag off) falls back
     # to round-based aging inside build_node_catalog.
-    head = (window_first_turn(brain, session_id, messages, turns=turns)
-            if view_policy else None)
+    head = window_first_turn(turns) if view_policy else None
 
     # Associated stubs (the subconscious): production
     # recall over the window's unencoded messages, catalog excluded, rendered
     # as the catalog's LAST entries tagged [associated]. Flag-gated for the
     # A/B. Guarded loud: retrieval is advisory — never block the catalog.
     associated = None
-    if stubs_on and turns is not None:
+    if stubs_on:
         try:
             from servers.scales.s1.encode_contract import (
                 PROVENANCE_TAGS, surfaced_ids_of)
@@ -497,8 +512,7 @@ def _build_catalog(brain, messages, session_id, view_policy=False, now=None,
                 exclude |= set((extra_ids or {}).get(key) or ())
             if exclude:
                 associated = _associated_stub_ids(
-                    brain, messages, session_id, exclude,
-                    streams=streams, turns=turns)
+                    brain, turns, session_id, exclude, streams=streams)
         except Exception as e:
             try:
                 brain._log_error('s1e_associated_stubs', e,
@@ -518,7 +532,7 @@ def _build_catalog(brain, messages, session_id, view_policy=False, now=None,
     return node_catalog, cataloged_ids, streams
 
 
-def _conversation_now_safe(brain, session_id, messages):
+def _conversation_now_safe(brain, session_id, turns):
     """Conversation time for the view policy's relative-time renders — replays
     inject historical [Current date:] prefixes; wall-clock would corrupt them
     (the S1 rule — tests/test_time_window_contract). A live session's now is
@@ -526,18 +540,20 @@ def _conversation_now_safe(brain, session_id, messages):
     logged and degrades to None (wall-clock render)."""
     try:
         from servers.clock import conversation_now
-        return conversation_now(messages=messages, brain=brain)
+        from servers.trace_contract import row_text, turn_incoming
+        return conversation_now(
+            messages=[{'role': 'user', 'content': row_text(r)}
+                      for t in turns for r in turn_incoming(t)], brain=brain)
     except Exception as e:
         log_error = getattr(brain, '_log_error', None)
         if log_error is not None:
             log_error('s1e_conversation_now', e,
                       'session=%s — relative times render against wall-clock'
-                      % (session_id or '')[:8])
+                      % session_short(session_id))
         return None
 
 
-def _associated_stub_ids(brain, messages, session_id, exclude_ids,
-                         streams=None, turns=None):
+def _associated_stub_ids(brain, turns, session_id, exclude_ids, streams=None):
     """The subconscious: ids of the K nodes production recall ranks nearest
     this window that the catalog does NOT already show: the encoder receives
     not just the conscious catalog but the associative penumbra recall ranked
@@ -566,12 +582,9 @@ def _associated_stub_ids(brain, messages, session_id, exclude_ids,
     recall's default NODE_TYPE_EXCLUSIONS drops them here, and
     build_node_catalog's community scan is the render chokepoint.
 
-    `turns` (optional): the pre-pulled _lived_turns list threaded from
-    _build_catalog so one window pull serves the cutoff and the seeds
-    (None → pull here; standalone/test callers). Coverage joins through
-    _turn_links on the pre-gathered `streams`; a turn with no link is real
-    (degraded join / orphan) and counts as unencoded — the probe's
-    convention.
+    `turns`: the run's window (_window). Coverage joins through _turn_links
+    on the pre-gathered `streams`; a turn with no link is real (degraded
+    join / orphan) and counts as unencoded — the probe's convention.
 
     Returns rank-ordered id list (may be empty). Raises to the caller's
     guard on read failure — advisory, never blocks the catalog.
@@ -580,16 +593,12 @@ def _associated_stub_ids(brain, messages, session_id, exclude_ids,
         ASSOCIATED_QUERY_CAP, ASSOCIATED_RECALL_LIMIT, ASSOCIATED_SEED_CAP,
         ASSOCIATED_STUBS_K)
     from servers.scales.s1.surface_contract import recall_score
+    from servers.trace_contract import row_text
 
-    if turns is None:
-        turns = _lived_turns(brain, session_id, _window_n_turns(messages))
-    links, _frontier = _turn_links(brain, session_id, turns, streams=streams)
+    links, _ends = _turn_links(brain, session_id, turns, streams=streams)
 
     def _body(ep):
-        meta = ep.get('metadata')
-        body = ((meta.get('content') if isinstance(meta, dict) else None)
-                or ep.get('summary') or '')
-        return body[:ASSOCIATED_QUERY_CAP].strip()
+        return row_text(ep)[:ASSOCIATED_QUERY_CAP].strip()
 
     seeds = []
     for t in turns:
@@ -627,7 +636,7 @@ def _associated_stub_ids(brain, messages, session_id, exclude_ids,
     return [nid for nid, _s in ranked[:ASSOCIATED_STUBS_K]]
 
 
-def _build_user_content(brain, messages, counter, session_id, precomputed=None,
+def _build_user_content(brain, turns, counter, session_id, precomputed=None,
                         view_policy=None, view_now=None, journal=None, gist=None):
     """Assemble S1 encoding prompt: stable preamble + dynamic body.
 
@@ -668,14 +677,14 @@ def _build_user_content(brain, messages, counter, session_id, precomputed=None,
         node_catalog, cataloged_ids, streams = precomputed
     else:
         node_catalog, cataloged_ids, streams = _build_catalog(
-            brain, messages, session_id, view_policy=view_policy)
+            brain, turns, session_id, view_policy=view_policy)
 
     conv_now = view_now
     if view_policy and conv_now is None:
-        conv_now = _conversation_now_safe(brain, session_id, messages)
+        conv_now = _conversation_now_safe(brain, session_id, turns)
     timeline = _render_lived_sequence_timeline(
-        brain, session_id, messages, streams=streams,
-        view_policy=view_policy, now=conv_now)
+        brain, session_id, turns, streams=streams,
+        view_policy=view_policy, now=conv_now, cataloged_ids=cataloged_ids)
 
     # Previous session context (per-session — no global leak across parallel sessions)
     prev_context = brain.session_context_for(session_id)
@@ -801,7 +810,7 @@ def _render_failed_encodes(brain, session_id, cap=3):
         return '\n'.join(lines) + '\n'
     except Exception as e:
         brain._log_error('s1e_failed_encodes_block', e,
-                         'session=%s — omitting block' % (session_id or '')[:8])
+                         'session=%s — omitting block' % session_short(session_id))
         return ''
 
 
@@ -812,92 +821,43 @@ def _xml_escape(s):
     return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
-def _lived_turns(brain, session_id, n_turns):
-    """The windowed turn list the lived timeline renders: episodes grouped into
-    turns, trimmed to the last `n_turns`. Raises on read failure.
-
-    One owner for the window: the timeline renders these turns and
-    window_first_turn dates the catalog against them, so the two can never
-    disagree about where the conversation window opens.
-    """
-    from servers.scales.s1.encode_contract import LIVED_SEQUENCE_PULL
-    from servers.trace_contract import SAID_AND_DID_REF_TYPES
-    episodes = brain.recall_episodes(
-        session_id=session_id, ref_type=list(SAID_AND_DID_REF_TYPES),
-        sort_order='desc', limit=LIVED_SEQUENCE_PULL)['episodes']
-    # Most-recent-N pulled desc; sort chronological so turns read in order.
-    episodes = sorted(episodes, key=lambda e: e.get('created_at') or '')
-
-    # Group into turns: a user_message opens a turn; the assistant_message + the
-    # tool_results before the next user_message belong to it. A leading non-user
-    # event (rare) opens an orphan turn so nothing is dropped.
-    turns = []
-    cur = None
-    for e in episodes:
-        rt = e.get('ref_type')
-        if rt == 'user_message' or cur is None:
-            cur = {'user': None, 'assistant': None, 'actions': []}
-            turns.append(cur)
-        if rt == 'user_message':
-            cur['user'] = e
-        elif rt == 'assistant_message':
-            cur['assistant'] = e
-        elif rt == 'tool_result':
-            cur['actions'].append(e)
-
-    return turns[-n_turns:]  # the hook window's turn count (_window_n_turns)
-
-
-def _window_n_turns(messages):
-    """The window-size rule — the ONE derivation of how many turns the chat
-    window spans, shared by the timeline render, the catalog cutoff
-    (window_first_turn) and the associated-stub seeds so the three can never
-    disagree about the window. Falls back to WINDOW_TURNS_FALLBACK when the
-    hook window carries no user rows."""
-    from servers.scales.s1.encode_contract import WINDOW_TURNS_FALLBACK
-    return (sum(1 for m in (messages or []) if m.get('role') == 'user')
-            or WINDOW_TURNS_FALLBACK)
-
-
-def window_first_turn(brain, session_id, messages, turns=None):
+def window_first_turn(turns):
     """The 1-based turn number the rendered timeline opens on — the
     window-aligned catalog cutoff (encode_contract.build_node_catalog's
-    `window_first_turn`). None when the window has no datable head, which the
-    caller reads as "no window cutoff available", falling back to round-based
-    aging rather than ageing everything.
-
-    `turns` (optional): the pre-pulled _lived_turns list, threaded from
-    _build_catalog so one window pull serves the cutoff and the stub seeds
-    (None → pull here; eval callers)."""
+    `window_first_turn`) for the run's window (_window). None when the window
+    has no datable head, which the caller reads as "no window cutoff
+    available", falling back to round-based aging rather than ageing
+    everything."""
     from servers.scales.s1.trace_links import display_turn
-    if turns is None:
-        try:
-            turns = _lived_turns(brain, session_id, _window_n_turns(messages))
-        except Exception:
-            return None
     for t in turns:
         if t.get('user'):
             return display_turn(t['user'].get('chain_id'))
     return None
 
 
-def _render_lived_sequence_timeline(brain, session_id, messages, streams=None,
-                                    view_policy=False, now=None):
+def _render_lived_sequence_timeline(brain, session_id, turns, streams=None,
+                                    view_policy=False, now=None,
+                                    cataloged_ids=None):
     """The XML lived sequence — messages + tool actions interleaved (piece 1).
 
     `view_policy` (encoder_view, resolved once in run_encoding): ON, the
     render policies apply — already-encoded turns get a stubbed <actions>
     element; node-op/lookup tool lines provenance already shows are dropped
     from every <actions>; <provenance> renders the verbs split
-    (created/revised/recalled/archived (me)) instead of the merged
+    (created/revised/recalled/searched/archived (me)) instead of the merged
     encoded(me). OFF: the pre-policy render (message text is full in both
     arms — the encoded-turn trim is retired).
 
-    Reads through the existing `recall_episodes` door (the conversational lens
-    over s0 traces), NOT a bespoke DAL query — docs/archive/S1-SCRIBE-REDESIGN.md §10.2.
-    Tool actions arrive as `tool_result` episodes whose `summary` already carries
-    the per-tool cue ("Edit: foo.py", "Bash: …"). Window-matched to the hook
-    window (trimmed to the same number of user turns as `messages`).
+    `cataloged_ids` — the ids the node catalog rendered this run
+    (build_node_catalog). Under the policy a provenance ref carries its title
+    only when its node is NOT among them: a node in the catalog is named by
+    its id, whose full body the reader already has above; any other node by
+    its title, the only body it has in the prompt. None → nothing counts as
+    cataloged, so every ref keeps its title.
+
+    `turns` is the run's window (_window, read through
+    brain.conversation_turns). Tool actions arrive as `tool_result` rows whose
+    `summary` already carries the per-tool cue ("Edit: foo.py", "Bash: …").
 
     `streams` (optional) is the pre-gathered {'surface','encode','touched'} dict from
     one trace_links.gather call, threaded in so the catalog and the <provenance>
@@ -907,33 +867,29 @@ def _render_lived_sequence_timeline(brain, session_id, messages, streams=None,
     <provenance> block (piece 2). Piece 1 is a pure timeline read.
     """
     from servers.scales.s1.encode_contract import ENCODING_AGENT
+    from servers.scales.s1.encoder_view import SPEAKER_ELEMENTS
+    from servers.trace_contract import (SPEAKER_REF_TYPES, row_speaker, row_text,
+                                        turn_incoming)
     lim = ENCODING_AGENT['message_display_limit']
 
-    # No fallback: the timeline IS the input. A failed read fails the run
-    # (logged by the background runner as scale_runner_thread_crash); the
-    # turns stay unencoded and the next due cycle retries them.
-    turns = _lived_turns(brain, session_id, _window_n_turns(messages))
-
     def _text(ep):
-        # The store-capped message body lives in metadata['content']; `summary`
-        # is the short display excerpt. Preserve the body and any store-limit
-        # marker when the timeline limit is None, then escape for XML.
-        meta = ep.get('metadata')
-        body = (meta.get('content') if isinstance(meta, dict) else None) or ep.get('summary') or ''
+        # The row's full text (the store-capped body, any store-limit marker
+        # kept) when the timeline limit is None, escaped for XML.
+        body = row_text(ep)
         cut = body[:lim] + ('…' if lim is not None and len(body) > lim else '')
         return _xml_escape(cut)
 
-    # Piece 2: per-turn <provenance> — the trace↔node links (what recall surfaced
-    # / what prior runs encoded, joined by stop). Guarded: any failure degrades to
-    # the piece-1 timeline (no provenance), never breaks the lived arm.
-    links, frontier = _turn_links(brain, session_id, turns, streams=streams)
+    # Piece 2: <provenance> — the trace↔node links (what recall surfaced / what
+    # prior runs encoded, joined by stop; one line per stop). Guarded: any
+    # failure degrades to the piece-1 timeline (no provenance), never breaks
+    # the lived arm.
+    links, ends = _turn_links(brain, session_id, turns, streams=streams)
 
-    # «tag» locality (fork #2): each provenance id ref carries its 1-line title so
-    # the encoder reads WHERE a node came up without scanning the catalog. Titles
-    # are fetched NAKED (cheap; the catalog already holds the rich bodies — this is
-    # a title-only lookup) in one batched get_bulk over the window's referenced ids.
-    # Guarded: a stub brain (tests, no _nodes) or any failure → bare refs, never a
-    # broken render.
+    # Provenance ref titles. Legacy arm: every ref carries its 1-line «tag».
+    # Policy: only a node with no catalog entry does (cataloged_ids) —
+    # the catalog's ids are what the reader dereferences. Fetched NAKED in one
+    # batched get_bulk (a title-only lookup). Guarded: a stub brain (tests, no
+    # _nodes) or any failure → bare refs, never a broken render.
     titles = {}
     ref_ids = set()
     for lk in links.values():
@@ -946,6 +902,8 @@ def _render_lived_sequence_timeline(brain, session_id, messages, streams=None,
             ref_ids.update(lk.get('recalled') or ())
             ref_ids.update(lk.get('looked_up') or ())
             ref_ids.update(lk.get('archived') or ())
+    if view_policy:
+        ref_ids -= set(cataloged_ids or ())
     if ref_ids:
         try:
             titles = {nid: (row.get('title') or '')
@@ -972,10 +930,11 @@ def _render_lived_sequence_timeline(brain, session_id, messages, streams=None,
         from servers.scales.s1.trace_links import display_turn
 
     out = ""
+    names = {}   # speaker → name, asked once per render
     for n, t in enumerate(turns, 1):
         uid = (t['user'] or {}).get('id') if t['user'] else None
         link = links.get(uid) if uid else None
-        n_disp = n   # n stays the window ordinal — the frontier index below
+        n_disp = n   # n stays the window ordinal — the `ends` index below
         if view_policy:
             # the real turn number — session-global, 1-based (trace_links
             # owns the axis; run attribution 'encoded(me, turn 5)' shares it
@@ -1000,16 +959,24 @@ def _render_lived_sequence_timeline(brain, session_id, messages, streams=None,
                 age_attr = ' age="%s"' % age
         out += '<turn n="%d"%s%s>\n' % (n_disp, age_attr, enc_attr)
         # Tag vocabulary is identity-native, not role-native:
-        # <me> = my side of the exchange; <other> = whoever is on the other side
-        # this session (usually the operator, sometimes an agent — an identity
-        # attr comes later). Presentation-layer only: the substrate keeps
-        # user_message/assistant_message; the join is by trace id.
-        if t['user']:
-            out += '  <other trace="%s">%s</other>\n' % (
-                t['user'].get('id', ''), _text(t['user']))
-        # <provenance> sits right after <other>: chronologically, recall/surface
-        # fires on the user prompt — before my reply exists.
-        prov = _render_provenance(links, frontier, t, n - 1, titles,
+        # <me> = my side of the exchange; the incoming side renders as its
+        # speaker's element (encoder_view.SPEAKER_ELEMENTS) — <other> for the
+        # operator, my partner this session, named when the session declares
+        # who that is. Presentation-layer only: the substrate keeps its
+        # ref_types; the join is by trace id.
+        for row in turn_incoming(t):
+            speaker = row_speaker(row)
+            el = SPEAKER_ELEMENTS[speaker]
+            if speaker not in names:
+                names[speaker] = brain.speaker_for(
+                    session_id, SPEAKER_REF_TYPES.get(speaker, row.get('ref_type')))
+            name = (' name="%s"' % _xml_escape(names[speaker]).replace('"', '&quot;')
+                    if names[speaker] else '')
+            out += '  <%s%s trace="%s">%s</%s>\n' % (
+                el, name, row.get('id', ''), _text(row), el)
+        # <provenance> sits right after the incoming side: chronologically,
+        # recall/surface fires on the prompt — before my reply exists.
+        prov = _render_provenance(links, ends, t, n - 1, titles,
                                   view_policy=view_policy)
         if prov:
             out += '  <provenance>%s</provenance>\n' % prov
@@ -1026,8 +993,8 @@ def _short_refs(ids, titles=None, title_first=False):
     known — the locality affordance (fork #2): WHERE a node came up in the
     timeline, complementary to the catalog's full WHAT-it-is. The 8-char short
     still matches the catalog so a ref dereferences there; the «tag» saves the
-    scan. Falls back to a bare `id:` when no title is mapped (stub brains, or an
-    id the title fetch missed).
+    scan. Renders a bare `id:` when no title is mapped (a cataloged node under
+    the view policy, a stub brain, or an id the title fetch missed).
 
     `title_first` (view policy): the canonical node_ref token — title-leading,
     double-quoted, id in parens, identical to every other mention of a node in
@@ -1053,16 +1020,25 @@ def _short_refs(ids, titles=None, title_first=False):
     return ' '.join(out)
 
 
-def _turn_links(brain, session_id, turns, streams=None):
-    """Compute the trace↔node link map + per-run frontier index for the window.
+_NO_ENDS = {'stop': frozenset(), 'run': frozenset()}
 
-    Returns (links, frontier):
-      links    — {user_trace_id: {surfaced, encoded, encoded_by}} from trace_links.
-      frontier — {encoded_by_run_id: window-index of the LAST turn that run covers},
-                 so the render shows a run's full encoded id-list once (at its
-                 frontier turn, adjacent to the unencoded boundary); earlier
-                 covered turns carry only their `encoded` attr — no 5× repetition
-                 (which the design warns would nudge dense source_refs).
+
+def _turn_links(brain, session_id, turns, streams=None):
+    """Compute the trace↔node link map + where each grouped ref list shows.
+
+    Returns (links, ends):
+      links — {user_trace_id: {surfaced, encoded, encoded_by, …}} from trace_links.
+      ends  — window indices of the LAST turn of each group, where that group's
+              refs render once instead of on every turn in it:
+              'stop' — the last turn on each chain stop. The link join is by
+                       stop, so every turn on one stop (several prompts before
+                       one reply) holds the same refs; the line renders on the
+                       last, after every prompt that fed it, beside the reply.
+              'run'  — the last turn each run covers, where its full encoded
+                       id-list renders (adjacent to the unencoded boundary);
+                       earlier covered turns carry only their `encoded` attr —
+                       no 5× repetition (which the design warns would nudge
+                       dense source_refs).
 
     `streams` (optional): the pre-gathered {'surface','encode','touched'} dict, so
     the catalog and this share one gather. None → gather here.
@@ -1079,7 +1055,7 @@ def _turn_links(brain, session_id, turns, streams=None):
     except AttributeError:
         # Expected, quiet: a stub brain (tests) without query_traces. Degrade to
         # the piece-1 timeline (no provenance) — production brains always have it.
-        return {}, {}
+        return {}, _NO_ENDS
     except Exception as e:
         # A real failure (trace-contract drift, malformed record) — LOUD, then
         # degrade (brain.errors is the surface, a bare print is not).
@@ -1089,68 +1065,70 @@ def _turn_links(brain, session_id, turns, streams=None):
                              'trace-link provenance failed; timeline renders without it')
         except Exception:
             pass
-        return {}, {}
+        return {}, _NO_ENDS
 
-    frontier = {}
+    last = {'stop': {}, 'run': {}}   # group key → index of its last turn
     for idx, t in enumerate(turns):
-        uid = (t['user'] or {}).get('id')
-        eb = (links.get(uid) or {}).get('encoded_by') if uid else None
+        user = t['user'] or {}
+        last['stop'][user.get('chain_id') or idx] = idx   # ascending walk → last wins
+        eb = (links.get(user.get('id')) or {}).get('encoded_by')
         if eb:
-            frontier[eb] = idx  # ascending walk → last index wins
-    return links, frontier
+            last['run'][eb] = idx
+    return links, {group: set(by_key.values()) for group, by_key in last.items()}
 
 
-def _render_provenance(links, frontier, turn, idx, titles=None,
+def _render_provenance(links, ends, turn, idx, titles=None,
                        view_policy=False):
     """One <provenance> line for a turn — REAL refs only, no coverage markers.
 
     Coverage lives on the turn itself (the `encoded="true|false"` attribute the
     timeline render stamps), so provenance never says "covered, nothing to
-    show". What renders: `surfaced:` refs (per-turn, 1:1),
-    the owning run's full id-list ONCE at the run's frontier turn (an edge-only
+    show". The line is the stop's: it renders only on the stop's last turn
+    (`ends['stop']`, from _turn_links), so turns sharing a stop show it once.
+    What renders: `surfaced:` refs (the stop's prompts' picks), the owning
+    run's full id-list ONCE at the run's last turn (`ends['run']`; an edge-only
     run has an empty id set → nothing), and the session's own node ops (joined by
     stop; empty in replayed eval corpora) — legacy: the merged
     `encoded(me):` (link['authored'] = created ∪ revised); view policy ON:
     the verb split (encoder_view.PROVENANCE_SPLIT — created / revised /
-    recalled / archived), which is what lets the node-op action lines drop
-    without losing the information. `titles` maps id→title for the «tag»
-    locality. Returns '' when there's nothing real to show.
+    recalled / searched / archived), which is what lets the node-op action
+    lines drop without losing the information. `titles` maps id→title; a ref
+    whose id it lacks renders as the id alone (under the policy the map holds
+    only nodes with no catalog entry). Returns '' when there's nothing real to
+    show.
     """
     uid = (turn['user'] or {}).get('id') if turn['user'] else None
     link = links.get(uid) if uid else None
-    if not link:
+    if not link or idx not in ends['stop']:
         return ''
     parts = []
     tf = bool(view_policy)   # title-first refs under the policy (system-wide shape)
     if link['surfaced']:
         parts.append('surfaced: %s' % _short_refs(link['surfaced'], titles, tf))
     eb = link['encoded_by']
-    if eb and frontier.get(eb) == idx and link['encoded']:
+    if eb and idx in ends['run'] and link['encoded']:
         # policy: turn-coordinate attribution ('encoded(me, turn 36)'); the
         # legacy arm keeps its 'encoded(S1S)' string byte-for-byte
         run_label = 'encoded(S1S)'
         if view_policy:
             from servers.scales.s1.encoder_view import encoded_run_label
             run_label = encoded_run_label(link.get('encoded_by_stop'))
-        # encoded ids: 94% have a full catalog entry above, so the id alone
-        # already points at the body — the title would be a second copy.
         parts.append('%s: %s' % (run_label, _short_refs(
-            link['encoded'], None if view_policy else titles, tf)))
+            link['encoded'], titles, tf)))
     if view_policy:
         from servers.scales.s1.encoder_view import PROVENANCE_SPLIT
-        for label, keys, with_titles in PROVENANCE_SPLIT:
-            ids = [i for k in keys for i in (link.get(k) or ())]
+        for label, keys, minus in PROVENANCE_SPLIT:
+            skip = {i for k in minus for i in (link.get(k) or ())}
+            ids = list(dict.fromkeys(
+                i for k in keys for i in (link.get(k) or ()) if i not in skip))
             if ids:
-                # cross-key dedup (an id can be both read and searched-up)
-                ids = list(dict.fromkeys(ids))
-                parts.append('%s: %s' % (label, _short_refs(
-                    ids, titles if with_titles else None, tf)))
+                parts.append('%s: %s' % (label, _short_refs(ids, titles, tf)))
     elif link.get('authored'):
         parts.append('encoded(me): %s' % _short_refs(link['authored'], titles))
     return ' | '.join(parts)
 
 
-def _write_pre_traces(brain, dispatch_fn, messages, user_content, counter,
+def _write_pre_traces(brain, dispatch_fn, turns, user_content, enc_chain,
                       session_id, interaction, catalog_ids=(),
                       prompt_pointer=None):
     """Write S1 encode traces: O (encoding prompt) and K (node catalog).
@@ -1169,10 +1147,7 @@ def _write_pre_traces(brain, dispatch_fn, messages, user_content, counter,
     catalog, so the encoder was not blind to them and the K trace must say so.
     """
     try:
-        from servers.session_context import SessionContext
-        ctx = SessionContext(session_id=session_id, stop_counter=counter)
-        enc_chain = ctx.s1e_chain()
-        turn_count = len(messages) if messages else 0
+        turn_count = len(turns) if turns else 0
         node_ids = {(cid or '')[:8] for cid in (catalog_ids or ()) if cid}
 
         dispatch_fn('trace_append', {

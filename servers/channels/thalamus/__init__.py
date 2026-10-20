@@ -1,4 +1,4 @@
-"""The Thalamus — the brain speaking to its streams (durable, windowed).
+"""The Thalamus — the brain speaking to its sessions (durable, windowed).
 
 A channel, not a scale: it runs no integrate(O, K) → Δ loop of its own. A
 delivery is traced as an **s0 K event**
@@ -13,9 +13,9 @@ channel considered and deprioritized in docs/LATERAL-SCALES.md, and it is the
 one carrying the "prove it's not just async S0" burden. Here the recipient is
 ANCHOR; the operator sees an item only when Anchor surfaces it.
 
-Sibling, not parent, to the self-channel: msgs are streams speaking to EACH
+Sibling, not parent, to the self-channel: msgs are sessions speaking to EACH
 OTHER (ephemeral, consume-once, TTL); the Thalamus is the brain speaking to its
-streams (durable, windowed, ledgered). One item can spawn N deliveries over its
+sessions (durable, windowed, ledgered). One item can spawn N deliveries over its
 life, knows who already got it, and can carry an answer back to its producer.
 Δ from any scale becomes a future O for a session; this is where that hand-off
 waits. The two layers meet at exactly one place — a live-now FYI, which

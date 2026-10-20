@@ -312,6 +312,26 @@ class TestRunsRecordTheirInteraction(BrainTestBase):
         self.assertEqual(self.delta('healer_generated')['interaction_fingerprint'],
                          self.fingerprint('s2_healer'))
 
+    def test_healer_names_why_a_batch_failed(self):
+        # The batch error is the cause _call_llm named, never a blanket
+        # "LLM call failed" for a reply that arrived but couldn't be used.
+        from servers.scales.s2.healer_encoder import HealerEncoder
+        cases = [('[{"node_id": "x", "question": "q?"",}]', 'end_turn',
+                  'unparseable response for batch 1'),
+                 ('[{"node_id": "x", "quest', 'max_tokens',
+                  'truncated response for batch 1')]
+        for raw, stop, expected in cases:
+            nid = self.node('Needs a question (%s)' % stop)
+            tel = {'elapsed_ms': 1, 'model': 'stub', 'stop_reason': stop,
+                   'input_tokens': 1, 'output_tokens': 1, 'cache_read_tokens': 0,
+                   'cache_creation_tokens': 0}
+            with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-not-a-key'}), \
+                    patch('servers.scales.s2.base.run_llm_once', return_value=(raw, tel)), \
+                    patch('servers.scales.s2.base.make_client', return_value=object()):
+                result = HealerEncoder(self.brain).run(
+                    [{'node_id': nid, 'needs_question': True}])
+            self.assertEqual(result['errors'], [expected])
+
     def test_healer_resolves_its_prompt_once_per_run(self):
         # Every batch runs on one read and the run records it — a read per
         # batch could run version N on early batches and record N+1.

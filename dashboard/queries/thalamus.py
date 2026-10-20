@@ -1,11 +1,11 @@
 """Thalamus view — the brain's standing-intent queue, read-only.
 
-The sibling of queries/self_channel: that module is streams speaking to each
+The sibling of queries/self_channel: that module is sessions speaking to each
 other (ephemeral, consume-once, TTL); this is the brain speaking to its
-streams (durable, windowed, ledgered). One read surface over brain_logs.db:
+sessions (durable, windowed, ledgered). One read surface over brain_logs.db:
 
   - query_items: every item with its DELIVERY LEDGER folded in — who saw it,
-    when, and at which moment (boot/stop). The daemon's own `thalamus_list`
+    when, and at which moment (prompt/stop). The daemon's own `thalamus_list`
     returns delivery COUNTS; the dashboard's whole job here is the fan-out
     (an item delivered to four sessions and still unanswered is the picture
     the counts flatten), so it reads the ledger directly, the same shape
@@ -70,7 +70,6 @@ def query_items(conn, hours: int = 168, include_closed: bool = True,
             "FROM thalamus_deliveries ORDER BY delivered_at").fetchall():
         delivered.setdefault(iid, []).append({
             "session_id": sid or '',
-            "session_short": (sid or '')[:8],
             "delivered_at": at,
             "via": via or '',
             "armed_epoch": epoch or 0,
@@ -84,7 +83,6 @@ def query_items(conn, hours: int = 168, include_closed: bool = True,
         except (ValueError, TypeError):
             item["refs"] = []
         item["needs_answer"] = bool(item["needs_answer"])
-        item["target_short"] = (item["target_session"] or '')[:8]
         item["deliveries"] = delivered.get(item["id"], [])
         out.append(item)
     return out

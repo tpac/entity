@@ -15,21 +15,24 @@ import re
 
 
 def cap_text_loud(s, limit, marker="…[+%d chars truncated]"):
-    """Truncate `s` to `limit` chars LOUDLY: rstrip the head and append `marker`
-    (a %d format string receiving the dropped char count). Returns `s` unchanged
-    when it fits. The dropped tail is genuinely lost at call sites that keep only
-    a head, so the marker is the only record it happened."""
+    """Truncate `s` to `limit` chars LOUDLY: rstrip the head and append `marker`.
+    A marker with `%d` receives the dropped char count; one without (a bare
+    '…') only says the text goes on. Returns `s` unchanged when it fits. The
+    dropped tail is genuinely lost at call sites that keep only a head, so the
+    marker is the only record it happened."""
     s = s or ''
     if len(s) <= limit:
         return s
-    return s[:limit].rstrip() + " " + (marker % (len(s) - limit))
+    tail = marker % (len(s) - limit) if '%d' in marker else marker
+    return s[:limit].rstrip() + " " + tail
 
 
 def cap_text_at_boundary(s, limit, marker="…[+%d chars truncated]"):
     """cap_text_loud that lands on a sentence boundary — the last sentence end
     (failing that, the last word break) past 60% of `limit` — so the kept head
-    reads as complete text a reader can act on, and the marker names how much
-    is behind it. Returns `s` unchanged when it fits."""
+    reads as complete text a reader can act on. A marker with `%d` names how
+    much is behind it; one without (a bare '…') only says the text goes on.
+    Returns `s` unchanged when it fits."""
     s = s or ''
     if limit <= 0 or len(s) <= limit:
         return s
@@ -44,7 +47,8 @@ def cap_text_at_boundary(s, limit, marker="…[+%d chars truncated]"):
         pos = head.rfind(' ')
         cut = pos if pos >= floor else limit
     kept = s[:cut].rstrip()
-    return kept + " " + (marker % (len(s) - len(kept)))
+    tail = marker % (len(s) - len(kept)) if '%d' in marker else marker
+    return kept + " " + tail
 
 
 _TRUNCATION_TAIL_RE = re.compile(r'\u2026(?:\s*[\[(]\+\d+[^\])]*[\])])?\s*$')
@@ -86,9 +90,9 @@ def compose_block_loud(items, render, cap, reserved=0, sep="\n\n"):
     already spent from the budget. Items past the cut are never rendered.
     `sep` joins the kept items — a blank line for multi-line items (the
     default), a newline for one-line rows. Returns (body, kept, dropped).
-    The caller owns head and tail wording: what a dropped item MEANS differs
-    per domain (a thalamus item stays due; a courier message is already
-    spent)."""
+    The caller owns head and tail wording: how a dropped item comes back
+    differs per domain (a thalamus item stays due for a later pull; a courier
+    message stays in the inbox for self_inbox or the next Stop)."""
     parts, used, dropped = [], reserved, 0
     for i, item in enumerate(items):
         rendered = render(item).strip()

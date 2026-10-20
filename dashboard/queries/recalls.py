@@ -153,9 +153,12 @@ def query_recall_log(conn, since_ts: str = '', limit: int = 50):
         # they reconcile directly with no remapping.
         selected_ids = []
         activation_ids = []
+        # surface_selected only: the chain also carries the tool moment's
+        # tool_shown K rows (memories shown at a file's first edit).
         k_row = conn.execute(
             "SELECT ref_id, summary, metadata FROM trace_events "
-            "WHERE chain_id = ? AND event_type = 'K'",
+            "WHERE chain_id = ? AND event_type = 'K' "
+            "AND ref_type = 'surface_selected'",
             (chain_id,),
         ).fetchone()
         judge_pointer = ''

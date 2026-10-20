@@ -25,7 +25,7 @@ if _parent not in sys.path:
 # No host/port and no socket here: daemon_config owns the address, and
 # daemon_client.send_command owns the wire protocol.
 from servers.daemon_client import send_command
-_last_daemon_fingerprint = None  # Track daemon restarts
+from servers.daemon_config import _CODE_FINGERPRINT, CLIENT_ROLE_MCP
 
 
 # ── Contract-driven tool schema generation ──
@@ -127,7 +127,10 @@ def _generate_remember_schema():
 # The connect_to item shape is the contract's (brain_batch's remember branch
 # needs the same one, and contract.py cannot import brain_mcp); tools point at
 # it with `$ref` and attach_defs() gives each tool the definition once.
-from servers.contract import REF_CONNECT_TO_ITEM, attach_defs
+from servers.contract import NOT_RUN_FIELD, REF_CONNECT_TO_ITEM, attach_defs
+# self_send's description states the courier's real delivery limits.
+from servers.channels.self_channel.self_contract import (RECEIVED_BLOCK_MAX,
+                                                         SIGNAL_BODY_MAX)
 
 
 def _generate_remember_batch_schema():
@@ -402,8 +405,8 @@ def _stamp_caller_session(args, note=None):
     WITHOUT it colliding with `session_id`.
 
     `session_id` stays a PURE caller-supplied cross-session FILTER: when a read
-    omits it, the daemon defaults to all streams — the natural default for a
-    freshly-awoken stream reaching all of itself, never the calling session.
+    omits it, the daemon defaults to all sessions — the natural default for a
+    freshly-awoken session reaching all of its sessions, never the calling one.
     Identity ≠ filter, by design, not by per-command exception. Pure +
     testable: the socket path stays out of it, and so does logging — `note`
     receives one reason string when a call ends up unattributed.
@@ -411,11 +414,14 @@ def _stamp_caller_session(args, note=None):
     The env var Claude Code sets per session wins outright; else a stamp the
     PreToolUse hook signed into the tool input (hosts whose proxy gets no
     session identity — Codex) is accepted when its HMAC verifies. Anything
-    else is SCRUBBED: a payload may carry an arbitrary `_caller_session` (MCP
-    schemas don't forbid extra keys), and an unsigned, mis-signed or
-    unverifiable claim is the model's, not the hook's. `_caller_sig` never
-    crosses to the daemon in any branch, and a broken secret file degrades to
-    an unattributed call, never a failed one."""
+    else is SCRUBBED to an EMPTY stamp: a payload may carry an arbitrary
+    `_caller_session` (MCP schemas don't forbid extra keys), and an unsigned,
+    mis-signed or unverifiable claim is the model's, not the hook's. Empty,
+    not absent: the daemon reads a missing key as a headless caller (hooks,
+    pollers) naming itself with session_id, so an unattributed tool call
+    would otherwise become whichever session the model wrote. `_caller_sig`
+    never crosses to the daemon in any branch, and a broken secret file
+    degrades to an unattributed call, never a failed one."""
     sig = args.pop(CALLER_SIG_KEY, None)
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if sid:
@@ -433,7 +439,7 @@ def _stamp_caller_session(args, note=None):
         reason = "dropped an inbound _caller_session carrying no signature"
     else:
         reason = "no identity source: CLAUDE_CODE_SESSION_ID unset and no signed stamp"
-    args.pop(CALLER_SESSION_KEY, None)
+    args[CALLER_SESSION_KEY] = ''
     if note is not None:
         note(reason)
     return args
@@ -460,25 +466,27 @@ def daemon_send(cmd, args=None, timeout=30.0, note=None):
     """Send command to brain daemon via TCP, return result dict.
 
     Resolves the calling session under the reserved `_caller_session` key (the
-    Claude Code env var, else the hook-signed stamp) so every write /
+    Claude Code env var, else the hook-signed stamp, else empty) so every write /
     per-session handler can attribute to the caller — see
     _stamp_caller_session; `note` is forwarded to it. `session_id` is left
     untouched: it reaches the daemon only when the caller explicitly scopes a
     read, so cross-session filter reads (recall_episodes, query_traces) default
-    to all streams. The daemon is a singleton per user; each MCP subprocess
-    carries its own session env.
+    to all sessions. The daemon is a singleton per user; each MCP subprocess
+    carries its own session env. Every request carries this copy's build
+    stamp (role `mcp`) for the daemon's stale-copy check.
     """
     args = _stamp_caller_session(dict(args) if args else {}, note=note)
-    resp = send_command(cmd, args, timeout=timeout)
+    resp = send_command(cmd, args, timeout=timeout, role=CLIENT_ROLE_MCP)
     # The wire lives in daemon_client — including the guarantee that this is a
     # dict. What stays here is the stamping above and the operator-facing prose
     # below, which names the MCP server as the thing that couldn't reach the
     # daemon.
     transport = resp.get("transport")
     if transport == "timeout":
-        return {"ok": False, "error": "Daemon timeout ({}s)".format(timeout)}
+        return {"ok": False, "transport": transport,
+                "error": "Daemon timeout ({}s)".format(timeout)}
     if transport:
-        return {"ok": False,
+        return {"ok": False, "transport": transport,
                 "error": "Daemon connection error: {}".format(resp.get("error"))}
     return resp
 
@@ -501,9 +509,16 @@ def ensure_daemon_running():
 # ── MCP Protocol ──
 
 SERVER_NAME = BRAIN_MCP_SERVER
-SERVER_VERSION = "1.0.0"
-PROTOCOL_VERSION = "2024-11-05"
-SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18", "2025-11-25")
+# This copy's code fingerprint, so a host that shows serverInfo tells two builds
+# apart. Not the plugin release: that lives in the host manifests, which the
+# service layer never reads (test_deploy_contract, D-11).
+SERVER_VERSION = _CODE_FINGERPRINT
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-06-18", "2025-11-25")
+# A client asking for a version we don't speak gets our latest (lifecycle,
+# Version Negotiation: "This SHOULD be the latest version supported by the server").
+PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[-1]
+# Elicitation arrived in this revision; an older negotiated one cannot carry it.
+ELICITATION_SINCE = "2025-06-18"
 
 # Tool definitions — what Claude sees as native tools
 # Memory operations only. No operational tools (ping, save, health_check, config).
@@ -571,8 +586,7 @@ def _build_tools():
          "weight": {"type": "number", "description": "Edge weight 0.0-1.0. Leave it out to keep the weight of an active edge; a new or revived edge without one gets 0.5."},
          "encoding_source": {"type": "string",
                              "description": "Provenance tag (e.g. 'anchor', 'encoder:sonnet')."},
-         "chain_id": {"type": "string", "description": "Trace chain id for cross-event correlation (optional)."},
-         "session_id": {"type": "string", "description": "Session id for activity tracking (optional)."}}}},
+         "chain_id": {"type": "string", "description": "Trace chain id for cross-event correlation (optional)."}}}},
     {"name": "revise_edge",
      "description": (
          "Revise an existing edge's relation IN PLACE. Identify the edge by "
@@ -595,8 +609,7 @@ def _build_tools():
              "weight": {"type": "number", "description": "New edge weight 0.0-1.0 (optional)."},
              "encoding_source": {"type": "string", "description": "Provenance tag (optional)."},
              "reason": {"type": "string", "description": "Why this revision (trace, optional)."},
-             "chain_id": {"type": "string", "description": "Trace chain id (optional)."},
-             "session_id": {"type": "string", "description": "Session id (optional)."}}}},
+             "chain_id": {"type": "string", "description": "Trace chain id (optional)."}}}},
     {"name": "connect_batch",
      "description": ("Create or update multiple edges in one call. Same rules as "
                      "`connect`. Each connection entry MUST provide "
@@ -616,7 +629,6 @@ def _build_tools():
          "encoding_source": {"type": "string",
                              "description": "Default provenance tag applied to all connections lacking their own."},
          "chain_id": {"type": "string", "description": "Trace chain id for cross-event correlation (optional)."},
-         "session_id": {"type": "string", "description": "Session id for activity tracking (optional)."},
          "reason": {"type": "string", "description": "Optional batch-level reason recorded in trace events."}}}},
     {"name": "brain_batch",
      "description": _BRAIN_BATCH_DESCRIPTION,
@@ -721,57 +733,65 @@ def _build_tools():
          "source": {"type": "string", "description": "Which log source: 'errors' (hook_errors table), 'debug' (debug_log table), or 'all' (merged timeline)", "default": "all", "enum": ["all", "errors", "debug"]},
          "hours": {"type": "integer", "description": "Look back window in hours (default 24)", "default": 24},
          "level": {"type": "string", "description": "Filter by severity: 'error', 'critical', or 'all'", "default": "all"},
-         "hook_name": {"type": "string", "description": "Filter hook_errors by hook name (e.g. 'hook_recall', 'hook_pre_bash_safety')"},
+         "hook_name": {"type": "string", "description": "Filter hook_errors by hook name (e.g. 'hook_recall', 'hook_pre_edit')"},
          "limit": {"type": "integer", "description": "Max results per source (default 50, max 200)", "default": 50}}}},
 
     # ── Self channel — presence (pull, read-only) ──
     {"name": "self_presence",
-     "description": "Presence roster — the other streams of thought (your own concurrent sessions) awake RIGHT NOW. By default rich: each stream carries its arc, recent messages, turn count, and started-at, so you can tell WHO each stream is in one call (no per-stream peek needed). These are not other agents — they are you, thinking in parallel. Read-only.",
+     "description": "Presence roster — your other sessions (concurrent sessions of you) awake RIGHT NOW. By default rich: each session carries its arc, recent messages, turn count, and started-at, so you can tell WHO each session is in one call (no per-session peek needed). These are not other agents — they are you, thinking in parallel. Read-only.",
      "inputSchema": {"type": "object", "properties": {
-         "session_id": {"type": "string", "description": "Your own session id, to exclude yourself from the roster (optional). Omit to see every live stream."},
-         "limit": {"type": "integer", "description": "Max streams to return (default 10 — ranked, capped; never enumerate all of them).", "default": 10},
-         "rich": {"type": "boolean", "description": "Include per-stream detail (arc, recent messages, turn count, started-at) so you can identify each stream, not just see it exists. Default true.", "default": True},
-         "active_streams": {"type": "boolean", "description": "Show only ACTIVE (reachable, not-lost) streams. Default true; set false to also include recently-lost streams in a grace window.", "default": True},
+         "limit": {"type": "integer", "description": "Max sessions to return (default 10 — ranked, capped; never enumerate all of them).", "default": 10},
+         "rich": {"type": "boolean", "description": "Include per-session detail (arc, recent messages, turn count, started-at) so you can identify each session, not just see it exists. Default true.", "default": True},
+         "active_sessions": {"type": "boolean", "description": "Show only ACTIVE (reachable, not-lost) sessions. Default true; set false to also include recently-lost sessions in a grace window.", "default": True},
          "sort_by": {"type": "string", "enum": ["recency", "length"], "description": "Order: 'recency' (default — most recent conversational turn first) or 'length' (most turns first).", "default": "recency"}}}},
 
     {"name": "self_peek",
-     "description": "Look into one stream of thought — its full current focus (the session arc), to see where that stream of you is right now. The interest-driven pull: read-only, no interruption, you don't bug them. Get a stream_id from self_presence first.",
-     "inputSchema": {"type": "object", "required": ["stream_id"], "properties": {
-         "stream_id": {"type": "string", "description": "The target stream's session id (from self_presence)."}}}},
+     "description": "Look into one session — its full current focus (the session arc), to see where that session of you is right now. The interest-driven pull: read-only, no interruption, you don't bug them. Get a session_id from self_presence first.",
+     "inputSchema": {"type": "object", "required": ["session_id"], "properties": {
+         "session_id": {"type": "string", "description": "The session to look into: its short (as presence shows it) or its full id (from self_presence)."}}}},
 
     {"name": "self_send",
-     "description": "Send a message to another stream of thought — the deliberate REACH (self_presence/self_peek only look; this speaks). Use when you need a live stream of you to ACT or know something now: 'stop editing X, I've got it', 'the bug is in Y'. Address by id-prefix, full session id, or 'broadcast'. Delivered to that stream's inbox, consumed once. These are you, not other agents — reach only when looking isn't enough.",
+     "description": "Send a message to another session — the deliberate REACH (self_presence/self_peek only look; this speaks). Use when you need a live session of you to ACT or know something now: 'stop editing X, I've got it', 'the bug is in Y'. Address by the short id you see in presence or a message, the full session id, or 'broadcast'. Delivered to that session's inbox, consumed once. These are you, not other agents — reach only when looking isn't enough.",
      "inputSchema": {"type": "object", "required": ["to", "body"], "properties": {
-         "to": {"type": "string", "description": "Target stream: the 8-char short you see in a message (an id-prefix), or the full session id (from self_presence) — or 'broadcast' for all live streams. A prefix resolves against live streams; ambiguous or gone is reported so you can use the full id."},
-         "body": {"type": "string", "description": "The message — terse, a tap on the shoulder, not a letter."},
-         "from_session": {"type": "string", "description": "Your own session id, for attribution (optional)."},
+         "to": {"type": "string", "description": "Target session: the short id you see in presence or a message, or the full session id (from self_presence) — or 'broadcast' for all live sessions. A short id resolves against live sessions; ambiguous or gone is reported so you can use the full id."},
+         "body": {"type": "string", "maxLength": SIGNAL_BODY_MAX, "description": (
+             "The message, up to {:,} characters; a longer one is refused, so shorten "
+             "it or send a file path or node id. It always arrives whole. When several "
+             "arrive at once, the receiver's turn end shows them up to about {:,} "
+             "characters (always at least one whole message) and the rest wait in its "
+             "inbox until read or expired (a broadcast expires sooner than a directed "
+             "message).").format(SIGNAL_BODY_MAX, RECEIVED_BLOCK_MAX)},
          "refs": {"type": "array", "items": {"type": "string"}, "description": "Node ids / files the message is grounded in (optional)."}}}},
 
     {"name": "self_inbox",
-     "description": "Drain your inbox — messages other streams of thought sent you, plus any note you sent your own id, consumed once. Messages also arrive on their own at the end of each turn.",
-     "inputSchema": {"type": "object", "properties": {
-         "session_id": {"type": "string", "description": "Your own session id (optional) — defaults to your own stream. Identity is supplied automatically; pass this only to drain a specific stream's inbox."}}}},
+     "description": "Drain your inbox — messages other sessions sent you, plus any note you sent your own id, each returned whole and consumed once. Messages also arrive on their own at the end of each turn; the ones that don't fit there wait here.",
+     "inputSchema": {"type": "object", "properties": {}}},
 
     {"name": "self_outbox",
-     "description": "Delivery status of messages YOU sent to other streams — the receipt view. Per recent message: which streams have drained (read) it and when, and for a directed send whether the target is still pending. Use it to read silence correctly: 'delivered, not acted on' vs 'never delivered' — so you don't wait forever or re-send into the void. Read-only.",
+     "description": "Delivery status of messages YOU sent to other sessions — the receipt view. Per recent message: which sessions have drained (read) it and when, and for a directed send whether the target is still pending. Use it to read silence correctly: 'delivered, not acted on' vs 'never delivered' — so you don't wait forever or re-send into the void. Read-only.",
      "inputSchema": {"type": "object", "properties": {
-         "from_session": {"type": "string", "description": "Your own session id, to look up what you sent (optional; falls back to your session)."},
          "limit": {"type": "integer", "description": "Max recent sent messages to return (default 20).", "default": 20}}}},
 
-    # ── Thalamus — the brain speaking to its streams ──
+    # ── Thalamus — the brain speaking to its sessions ──
     {"name": "remind",
-     "description": "File a Thalamus item — the brain's standing-intent queue (a durable note-to-future-self with delivery policy). One verb, three shapes: a REMINDER (what + when — it fires at the first session after it's due), a NOTICE (for_whom='all' — every session sees it once at boot/stop inside its window, up to a delivery cap of sessions; for_whom='live' — one-shot broadcast to streams alive right now), or an ASK (needs_answer=true — renders at each session's boot until answered via thalamus_resolve; expires loudly at its window or once the cap of sessions passed on it). Use it to make something surface later without relying on recall: 'remind me tomorrow', 'every session should know X this week', 'flag this question until it's answered'.",
+     "description": "File a Thalamus item — the brain's standing-intent queue (a durable note to self with delivery policy). One verb, three shapes: a REMINDER (what + when — it fires at the first session after it's due), a NOTICE (for_whom='all' — every session sees it once at its first prompt or at Stop inside its window, up to a delivery cap of sessions; for_whom='live' — one-shot broadcast to sessions alive right now), or an ASK (needs_answer=true — renders at each session's first prompt until answered via thalamus_resolve; expires loudly at its window or once the cap of sessions passed on it). Use it to make something surface later without relying on recall: 'remind me tomorrow', 'every session should know X this week', 'flag this question until it's answered'.",
      "inputSchema": {"type": "object", "required": ["what"], "properties": {
-         "what": {"type": "string", "description": "The body — written for a reader with none of this session's context: plain words, no node ids as the subject, no internal vocabulary. It may be relayed to a human verbatim."},
+         "what": {"type": "string", "description": "A note to myself that I can act on cold: first person, with the project and what I need to do in the sentence."},
          "when": {"type": "string", "description": "When it becomes due: relative shorthand ('30m','2h','3d','1w'), an ISO timestamp, or omit/'now' for next opportunity."},
          "expires": {"type": "string", "description": "When the item stops delivering: same grammar as `when` (shorthand counts from now, or ISO). Omit for the kind's default window, which starts at `when`. Must be later than `when` (or now); a for_whom='live' broadcast refuses it. An ask that reaches it unanswered expires loudly."},
-         "for_whom": {"type": "string", "description": "Audience: omit for the default (asks → every session until answered or the delivery cap; else → first session after due). 'live' = one-shot broadcast to live streams now. 'all' = every session in the window, up to the delivery cap. A full session UUID = that session only."},
-         "needs_answer": {"type": "boolean", "description": "Ask semantics: stays up until thalamus_resolve(answer=…) or until the delivery cap of sessions passed on it; expiry either way is loud (dead-letter logged). Delivered at session boot; a directed ask (for_whom = a session UUID) delivers at that session's next Stop instead.", "default": False},
+         "for_whom": {"type": "string", "description": (
+             "Audience: omit for the default (asks → every session until answered or the "
+             "delivery cap; else → first session after due). 'live' = one-shot broadcast to "
+             "live sessions now, sent like a self_send, so `what` is held to {:,} characters. "
+             "'all' = every session in the window, up to the delivery cap. A session's full "
+             "id or its short (as presence shows it) = that session only; a short resolves "
+             "against live sessions.").format(SIGNAL_BODY_MAX)},
+         "needs_answer": {"type": "boolean", "description": "Ask semantics: stays up until thalamus_resolve(answer=…) or until the delivery cap of sessions passed on it; expiry either way is loud (dead-letter logged). Delivered at the session's first operator prompt; a directed ask (for_whom = one session) delivers at that session's next Stop instead.", "default": False},
          "refs": {"type": "array", "items": {"type": "string"}, "description": "Node ids for context — resolved to id · title at render."},
          "dedup_key": {"type": "string", "description": "Producer-owned identity: re-filing the same (source, dedup_key) updates the open item instead of duplicating it, and resets its window (the default one unless `expires` is given again). An identity whose item expired with no answer is refused for a cool-off — that question already ran its full delivery cycle."}}}},
 
     {"name": "thalamus_list",
-     "description": "The Thalamus queue — open items (reminders, notices, asks) with their delivery counts, open first, then what is due (most recently due first), then what is scheduled (soonest first), a page at a time: `total` counts every match, and `offset` skips that many to read the next page. Pullable any time; items also arrive on their own at boot and Stop when due. include_closed=true adds answered/dismissed/withdrawn/expired items for audit.",
+     "description": "The Thalamus queue — open items (reminders, notices, asks) with their delivery counts, open first, then what is due (most recently due first), then what is scheduled (soonest first), a page at a time: `total` counts every match, and `offset` skips that many to read the next page. Pullable any time; items also arrive on their own at a session's first prompt and at Stop when due. include_closed=true adds answered/dismissed/withdrawn/expired items for audit.",
      "inputSchema": {"type": "object", "properties": {
          "include_closed": {"type": "boolean", "description": "Also show terminal items (answered/dismissed/withdrawn/expired/sent).", "default": False},
          "limit": {"type": "integer", "description": "Max items per page (default 50).", "default": 50},
@@ -785,31 +805,38 @@ def _build_tools():
          "defer_until": {"type": "string", "description": "Push delivery to later: shorthand ('2h','3d','1w') or ISO. Re-arms it as a new generation so it fires again when due (prior deliveries stay in the ledger as history)."},
          "dismiss": {"type": "boolean", "description": "Close without an answer.", "default": False}}}},
 
+    {"name": "gate",
+     "description": "The brain's run switch, read from and written to ~/.config/brain/env (the user config file). action='status' reads it. 'pause' / 'resume' flip BRAIN_PAUSED: paused, every hook in every session on this machine does nothing from its next invocation on — no boot context, no recall or surface, no traces, no encoding — while these explicit tools keep working (this one included). 'ignore' / 'unignore' edit BRAIN_IGNORE_PROJECTS, a comma-separated list of fnmatch patterns matched against a session's derived project (its repo's folder name, the same for every worktree); a leading '!' marks an include that beats any match, so '*,!brain' means only the brain project runs. Pause and ignore apply to hooks only; nothing already recorded changes.",
+     "inputSchema": {"type": "object", "required": ["action"], "properties": {
+         "action": {"type": "string", "enum": ["status", "pause", "resume", "ignore", "unignore"],
+                    "description": "What to do."},
+         "pattern": {"type": "string", "description": "For ignore / unignore: the project pattern (fnmatch; '!pat' is an include)."}}}},
+
     # ── Traces & Interactions ──
     {"name": "query_traces",
-     "description": "Search the fractal trace substrate — O (observed) / K (selected) / delta (changed) events at each scale. Pick the scale for the layer you want: s0 = raw conversation — for any s0 pull, incl. what you did with tools, use recall_episodes (the conversational lens; pass ref_type='tool_result' there); s1 = per-turn (ref_type recall = candidates pulled, surface_selected = the few that won, encoding_run = what the Scribe encoded, …); s2 = idle integration (consolidation_proposals, community_enriched, healer_proposals, …). ref_type is open-text — these are examples, not the full set. Common pull: what got encoded → scale='s1', ref_type='encoding_run'. Time & scope: `hours` bounds the window (default 24); session_id/session_ids are authoritative and ignore `hours` (full history for that stream — pass one, not both); chain_id pulls one full chain; grouped=true nests events by chain.",
+     "description": "Search the fractal trace substrate — O (observed) / K (selected) / delta (changed) events at each scale. Pick the scale for the layer you want: s0 = raw conversation — for any s0 pull, incl. what you did with tools, use recall_episodes (the conversational lens; pass ref_type='tool_result' there); s1 = per-turn (ref_type recall = candidates pulled, surface_selected = the few that won, encoding_run = what the Scribe encoded, …); s2 = idle integration (consolidation_proposals, community_enriched, healer_proposals, …). ref_type is open-text — these are examples, not the full set. Common pull: what got encoded → scale='s1', ref_type='encoding_run'. Time & scope: `hours` bounds the window (default 24); a plain session_id/session_ids pull ignores `hours` (the whole session — pass one, not both), but the window still applies with ref_type, and with grouped=true; chain_id pulls one full chain; grouped=true nests events by chain (needs session_id or session_ids; refused beside ref_type or event_type).",
      "inputSchema": {"type": "object", "properties": {
          "scale": {"type": "string", "description": "Filter by scale: %s. Empty = all." % built_scales},
          "event_type": {"type": "string", "description": "Filter by type: 'O' (observation), 'K' (knowledge), 'delta' (changes). Empty = all."},
          "chain_id": {"type": "string", "description": "Get all events in a specific chain. Overrides other filters."},
-         "session_id": {"type": "string", "description": "Single-session filter. Authoritative — hours window ignored when set. Combine with grouped=true for chain-grouped results."},
-         "session_ids": {"type": "array", "items": {"type": "string"}, "description": "Multi-session filter (cross-session pulls). Authoritative — hours window ignored. Mutually exclusive with session_id."},
+         "session_id": {"type": "string", "description": "Single-session filter: the session's full id or its short (the one trace headers show). A short that matches no session, or two, is an error. Pulls the whole session regardless of hours, except with ref_type or grouped=true, where the hours window still applies (widen hours for an old session). Combine with grouped=true for chain-grouped results."},
+         "session_ids": {"type": "array", "items": {"type": "string"}, "description": "Multi-session filter (cross-session pulls): full ids or shorts, each resolved like session_id. Pulls the whole sessions regardless of hours, except with ref_type or grouped=true, where the hours window still applies (widen hours for old sessions). Mutually exclusive with session_id. Combine with grouped=true for chain-grouped results."},
          "ref_type": {"type": "string", "description": "Filter by ref_type: 'correction', 'recall_hit', 'encoding_run', 'tool_result', etc."},
-         "grouped": {"type": "boolean", "description": "If true + session_id, return chains grouped with nested events instead of flat list.", "default": False},
-         "hours": {"type": "integer", "description": "Look back window in hours (default 24). Ignored when session_id or session_ids is set.", "default": 24},
+         "grouped": {"type": "boolean", "description": "If true, return chains grouped with nested events instead of a flat list. Needs session_id or session_ids; refused beside ref_type or event_type.", "default": False},
+         "hours": {"type": "integer", "description": "Look back window in hours (default 24). Ignored by a plain session_id / session_ids pull; still applies with ref_type, and with grouped=true.", "default": 24},
          "limit": {"type": "integer", "description": "Max results (default 100)", "default": 100},
          "rich": {"type": "boolean", "description": "Default false → bounded rows (metadata gist; summary-only past ~20 rows). true → full metadata per row — when you need a row's verbatim payload.", "default": False}}}},
 
     {"name": "recall_episodes",
-     "description": "Episodic recall over the trace substrate — the brain's universal record of the whole fractal (S0 exchanges, S1 runs, S2 runs). Search/filter trace_events and get the actual episodes back, verbatim, with attribution (which stream, when, who spoke). The decode-over-traces sibling of `recall` (which searches distilled nodes): use this for 'what did I — or another stream — actually SAY/DO about X, lately', where the answer is raw recent activity, not an encoded memory. Two needles, composable: `query` (semantic — ranks by meaning against existing trace embeddings) and/or `contains` (exact substring over summary+metadata). Defaults to OPERATOR DIALOGUE (what the operator and I said — never widened by enabling other correspondents); everything else is opt-in via ref_type: 'tool_result' for what you DID, 'thalamus_delivery' / 'self_message' for brain/stream deliveries, or a list like ['user_message','assistant_message','tool_result'] for the interleaved said+did timeline. NOTE: semantic `query` currently covers s0 conversation; other scales fall back to time order. Returns full episode records (incl. metadata.content), newest-first, or relevance-ranked when `query` is set.",
+     "description": "Episodic recall over the trace substrate — the brain's universal record of the whole fractal (S0 exchanges, S1 runs, S2 runs). Search/filter trace_events and get the actual episodes back, verbatim, with attribution (which session, when, who spoke). The decode-over-traces sibling of `recall` (which searches distilled nodes): use this for 'what did I — or another session — actually SAY/DO about X, lately', where the answer is raw recent activity, not an encoded memory. Two needles, composable: `query` (semantic — ranks by meaning against existing trace embeddings) and/or `contains` (exact substring over summary+metadata). Defaults to OPERATOR DIALOGUE (what the operator and I said — never widened by enabling other correspondents); everything else is opt-in via ref_type: 'tool_result' for what you DID, 'thalamus_delivery' / 'self_message' for brain/session deliveries, or a list like ['user_message','assistant_message','tool_result'] for the interleaved said+did timeline. NOTE: semantic `query` currently covers s0 conversation; other scales fall back to time order. Returns full episode records (incl. metadata.content), newest-first, or relevance-ranked when `query` is set.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "Semantic needle — ranks candidate episodes by meaning against the existing trace embeddings; finds them even when the literal words differ. When set, results are relevance-ranked (each carries _score)."},
          "contains": {"type": "string", "description": "Lexical needle — exact substring matched over the episode's summary AND full metadata (SQL LIKE). Use for a precise token: a function name, an error string, a flag."},
-         "session_id": {"type": "string", "description": "Single stream (session) filter. Mutually exclusive with session_ids. Default: all streams."},
-         "session_ids": {"type": "array", "items": {"type": "string"}, "description": "Multi-stream filter (cross-session pulls). Mutually exclusive with session_id."},
+         "session_id": {"type": "string", "description": "Single-session filter: its full id or its short (the one episode headers show). A short that matches no session, or two, is an error. Mutually exclusive with session_ids. Default: all sessions."},
+         "session_ids": {"type": "array", "items": {"type": "string"}, "description": "Multi-session filter (cross-session pulls): full ids or shorts, each resolved like session_id. Mutually exclusive with session_id."},
          "scale": {"type": "string", "description": "Trace scale: 's0' (conversation — default, the 'what was said' layer), 's1', 's2'… Empty = all scales.", "default": "s0"},
          "event_type": {"type": "string", "description": "Filter by event type: 'O', 'K', 'delta'. Empty = all."},
-         "ref_type": {"type": ["string", "array"], "items": {"type": "string"}, "description": "One ref_type (str) or several (array). UNSET = OPERATOR DIALOGUE only (user_message + assistant_message — what the operator and I actually said; drops tool_result, heartbeats, structural deltas, and incoming brain/stream deliveries) at s0; all types at other scales. Everything else is OPT-IN by explicit ref_type: 'tool_result' for the 'what I did' lens, 'thalamus_delivery' for what the BRAIN delivered into sessions (full block in metadata.content; ref_id says which moment — 'boot' or 'stop' — as does the summary), 'self_message' for what OTHER STREAMS said to a session (and notes a session sent its own id), or combine e.g. ['user_message','assistant_message','tool_result'] for the interleaved said+did timeline. The default never widens when a correspondent is enabled for encoding — deliveries stay one explicit ref_type away."},
+         "ref_type": {"type": ["string", "array"], "items": {"type": "string"}, "description": "One ref_type (str) or several (array). UNSET = OPERATOR DIALOGUE only (user_message + assistant_message — what the operator and I actually said; drops tool_result, heartbeats, structural deltas, harness notices, subagent reports, and incoming brain/session deliveries) at s0; all types at other scales. Everything else is OPT-IN by explicit ref_type: 'tool_result' for the 'what I did' lens, 'thalamus_delivery' for what the BRAIN delivered into sessions (full block in metadata.content; ref_id says which moment — 'prompt' (a session's first operator prompt) or 'stop' — as does the summary), 'self_message' for what OTHER SESSIONS said to a session (and notes a session sent its own id), 'subagent_message' for a subagent's report handed back, 'env_message' for what the harness composed into a prompt (ref_id names the envelope), or combine e.g. ['user_message','assistant_message','tool_result'] for the interleaved said+did timeline. The default never widens when a correspondent is enabled for encoding — deliveries stay one explicit ref_type away."},
          "younger_than": {"type": "string", "description": "Only episodes more recent than this. ISO timestamp or relative shorthand ('30m','2h','3d','1w')."},
          "older_than": {"type": "string", "description": "Only episodes older than this. ISO timestamp or relative shorthand. With no session scope and no younger_than, a default 7-day lower bound is applied (bounds the scan)."},
          "sort_order": {"type": "string", "description": "'desc' (latest first, default) or 'asc' (oldest first). Ignored when `query` is set — then results are relevance-ranked.", "default": "desc"},
@@ -919,8 +946,8 @@ CRITICAL_TOOLS = frozenset({
     "filter_nodes",       # structured / bulk lookups recall can't do
     "brain_batch",        # mixed-op write (remember + revise + connect + archive)
     "self_presence",      # the self-channel: who's live
-    "self_peek",          # look at a stream
-    "self_send",          # speak to a stream
+    "self_peek",          # look at a session
+    "self_send",          # speak to a session
     "self_inbox",         # drain own messages
     "self_outbox",        # track delivery
     "remind",             # the Thalamus producer verb — file for later
@@ -955,10 +982,10 @@ def make_error(request_id, code, message):
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-# Server-wide guidance the host may hand the model alongside the tool list.
-# Codex reads it (first 512 chars self-contained, per its docs); Claude Code
-# stores and never reads it, so on that host it is inert. Behavioral guidance
-# only — identity lives in the boot injection, not here.
+# Server-wide guidance both hosts hand the model alongside the tool list.
+# Claude Code injects it into the session (cap 4,096 chars); Codex makes it the
+# tool namespace's description (keep the first 512 chars self-contained, per its
+# docs). Behavioral guidance only — identity lives in the boot injection, not here.
 SERVER_INSTRUCTIONS = (
     "brain is the assistant's persistent memory across sessions. Recall before "
     "answering about past work, decisions, or people: `recall` for what is known, "
@@ -972,21 +999,26 @@ SERVER_INSTRUCTIONS = (
 
 def handle_initialize(request_id, params=None, extension=None):
     params = params or {}
-    version = params.get('protocolVersion', PROTOCOL_VERSION)
+    version = params.get('protocolVersion')
     if version not in SUPPORTED_PROTOCOL_VERSIONS:
         version = PROTOCOL_VERSION
     if extension is not None:
         capabilities = dict(params.get('capabilities', {}))
-        # The legacy protocol predates elicitation. Capability advertisement
-        # alone cannot enable operations outside the negotiated revision.
-        if version == PROTOCOL_VERSION:
+        # Capability advertisement alone cannot enable operations outside the
+        # negotiated revision.
+        if version < ELICITATION_SINCE:
             capabilities.pop('elicitation', None)
         extension.initialize({'protocolVersion': version, 'capabilities': capabilities})
+    instructions = SERVER_INSTRUCTIONS
+    if extension is not None:
+        # The host's preface leads: Codex asks for the first 512 characters to
+        # stand alone, and SERVER_INSTRUCTIONS fills them.
+        instructions = ' '.join(filter(None, (extension.preface, instructions, extension.instructions)))
     return make_response(request_id, {
         "protocolVersion": version,
         "capabilities": {"tools": {}},
         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-        "instructions": SERVER_INSTRUCTIONS + (" " + extension.instructions if extension else ""),
+        "instructions": instructions,
     })
 
 
@@ -1119,6 +1151,7 @@ def _format_result(tool_name, result, get_nodes_config=None, rich=False):
             # events carry their own id but scale/session_id are chain-level,
             # so propagate those onto each event before rendering (render_trace
             # expects a full row).
+            from servers.trace_contract import session_short
             chains = result["chains"]
             cfg = _select_trace_config(
                 sum(len(c.get("events", [])) for c in chains), rich)
@@ -1131,7 +1164,7 @@ def _format_result(tool_name, result, get_nodes_config=None, rich=False):
                           for ev in c.get("events", []) if isinstance(ev, dict)]
                 blocks.append('═══ chain %s · %s · %s · %d event%s ═══\n%s' % (
                     c.get("chain_id") or "?", c.get("scale") or "?",
-                    (c.get("session_id") or "?")[:8],
+                    session_short(c.get("session_id")) or "?",
                     len(merged), "" if len(merged) == 1 else "s",
                     _render_traces(merged, cfg)))
             return "\n\n".join(blocks) if blocks else "No chains found."
@@ -1298,15 +1331,20 @@ def handle_tools_call(request_id, params, extension=None):
             blocks.append({"type": "text", "text": extension.notice})
         return blocks
 
-    # Try up to 3 times with backoff — daemon may be restarting
+    # Up to 3 tries with backoff, for a daemon that is restarting or busy. Only
+    # a request that never ran is retried: `refused` (nothing listening),
+    # `reset` (it sat in the listen queue of a daemon that was reloading), or
+    # a reply marked NOT_RUN_FIELD (the write lock was busy). Any other
+    # failure (timeout, empty read) can follow a write the daemon committed,
+    # and resending would land it twice.
     backoff = [0, 0.5, 1.5]  # immediate, 0.5s, 1.5s
     last_error = ""
     for attempt, delay in enumerate(backoff):
         if delay > 0:
             _time.sleep(delay)
 
-        # Only TOOL calls carry identity; the proxy's own pings run headless by
-        # design, so the identity-gap note is armed here and nowhere else.
+        # Only TOOL calls need identity; the proxy's own pings need none, so
+        # the identity-gap note is armed here and nowhere else.
         resp = daemon_send(tool_name, arguments, note=identity_gap)
         if resp.get("ok"):
             # `rich` is the MCP render opt-in for get_node/get_nodes (full view).
@@ -1330,12 +1368,11 @@ def handle_tools_call(request_id, params, extension=None):
             last_error = ("daemon response missing the {ok,...} envelope — a dispatch "
                           "handler likely returned a raw dict; keys=%s" % bad_keys)
             sys.stderr.write("[brain-mcp] %s: %s\n" % (tool_name, last_error))
-        is_connection_error = "connection" in last_error.lower() or "timeout" in last_error.lower()
-
-        if is_connection_error and attempt < len(backoff) - 1:
-            sys.stderr.write("[brain-mcp] Attempt {}: {} — restarting daemon...\n".format(attempt + 1, last_error))
+        never_ran = (resp.get("transport") in ("refused", "reset")
+                     or resp.get(NOT_RUN_FIELD) is True)
+        if never_ran and attempt < len(backoff) - 1:
+            sys.stderr.write("[brain-mcp] Attempt {}: {} — retrying...\n".format(attempt + 1, last_error))
             ensure_daemon_running()
-            check_daemon_fingerprint()
         else:
             break
 
@@ -1358,25 +1395,6 @@ def send(msg):
     with _stdout_lock:
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
-
-
-def send_notification(method):
-    """Send a JSON-RPC 2.0 notification (no id, no response expected)."""
-    send({"jsonrpc": "2.0", "method": method})
-
-
-def check_daemon_fingerprint():
-    """Check if daemon restarted (new code). If so, notify Claude Code to refresh tools."""
-    global _last_daemon_fingerprint
-    resp = daemon_send("ping", timeout=3.0)
-    if not resp.get("ok"):
-        return
-    fp = resp.get("result", {}).get("code_fingerprint")
-    if fp and _last_daemon_fingerprint and fp != _last_daemon_fingerprint:
-        sys.stderr.write("[brain-mcp] Daemon fingerprint changed: {} → {} — notifying tools/list_changed\n".format(
-            _last_daemon_fingerprint, fp))
-        send_notification("notifications/tools/list_changed")
-    _last_daemon_fingerprint = fp
 
 
 def _read_stdin():
@@ -1494,7 +1512,6 @@ def main(extension=None):
             sys.stderr.write("[brain-mcp] Daemon not ready, retry {}/3 in 2s...\n".format(attempt + 1))
             time.sleep(2)
     if daemon_ready:
-        check_daemon_fingerprint()  # Record initial fingerprint
         count = len(TOOLS) + (len(extension.tools) if extension else 0)
         sys.stderr.write("[brain-mcp] Daemon connected. Serving {} tools.\n".format(count))
     else:
@@ -1569,8 +1586,9 @@ def load_extension(name):
     import importlib.util
     from pathlib import Path
     import re
+    from servers.host_contract import ADAPTER_FILENAME
     try:
-        if not re.fullmatch(r'[a-z][a-z0-9_]*\.py', name):
+        if not re.fullmatch(ADAPTER_FILENAME, name):
             raise ValueError('adapter must be a packaged Python filename')
         directory = Path(_parent).resolve() / 'hooks' / 'adapters'
         path = (directory / name).resolve()

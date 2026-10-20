@@ -9,7 +9,7 @@ import json
 import os
 import time
 import pytest
-from servers.trace_contract import build_selection_metadata
+from servers.trace_contract import build_selection_metadata, session_short
 from tests.isolated_brain import brain_env
 
 # A K stamp for builder calls — the builders require one.
@@ -32,8 +32,8 @@ class TestS0StopTraces:
     def _simulate_stop(self, session_id, stop, user_msg, assistant_msg,
                        recall_log_id=None):
         """Simulate what hook_post_response_track writes for S0 traces."""
-        chain = 's0-%s-%s' % (session_id[:8], stop)
-        recall_chain = 's1r-%s-%s' % (session_id[:8], stop) if recall_log_id else ''
+        chain = 's0-%s-%s' % (session_short(session_id), stop)
+        recall_chain = 's1r-%s-%s' % (session_short(session_id), stop) if recall_log_id else ''
 
         self.dal.append(
             chain_id=chain, scale='s0', event_type='K',
@@ -74,7 +74,7 @@ class TestS0StopTraces:
                                     recall_log_id='9999')
         events = self.dal.get_chain(chain)
         k_event = events[0]
-        expected = 's1r-%s-12' % session_id[:8]
+        expected = 's1r-%s-12' % session_short(session_id)
         assert k_event['metadata']['recall_chain'] == expected
 
 
@@ -94,7 +94,7 @@ class TestS0ToolTraces:
         """Tool results share the same s0-{session}-{stop} chain as messages."""
         session_id = 'sess-tool-test'
         stop = '15'
-        chain = 's0-%s-%s' % (session_id[:8], stop)
+        chain = 's0-%s-%s' % (session_short(session_id), stop)
 
         # Simulate tool call (what PostToolUse writes)
         self.dal.append(
@@ -141,7 +141,7 @@ class TestS1RecallTraces:
     def _simulate_recall(self, session_id, stop, query, candidates, selected,
                          additional_context):
         """Simulate what hook_recall writes for S1 traces."""
-        chain = 's1r-%s-%s' % (session_id[:8], stop)
+        chain = 's1r-%s-%s' % (session_short(session_id), stop)
 
         cand_detail = ['%s|%s|%.2f|%s' % (c['id'], c['title'], c['score'], c['type'])
                         for c in candidates]
@@ -237,7 +237,7 @@ class TestS1EncodeTraces:
     def _simulate_encode(self, session_id, counter, turn_count, chars,
                          node_ids, actions, final_text):
         """Simulate what encoding_agent + daemon_hooks write for S1 encode traces."""
-        chain = 's1e-%s-%d' % (session_id[:8], counter)
+        chain = 's1e-%s-%d' % (session_short(session_id), counter)
 
         # O: from encode.py — ref_id is the db_dir-relative payload pointer
         # (TRACE-MODES step 2 flipped the semantics from an absolute tmp path).

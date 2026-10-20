@@ -300,10 +300,6 @@ def get_excluded_types(operation: str) -> set:
 PIPELINE = {
     'user_message_query': 4000,
     'assistant_response_store': 8000,  # S0 episode bodies, both conversation roles
-    'recent_message_content': 8000,  # upstream cap on the daemon_hooks trace pull;
-                                     # must cover every SURFACE conversation cap
-                                     # (the last assistant message travels whole) —
-                                     # enforced by test_pipeline_contract.TestTruncationInvariants.
 }
 
 

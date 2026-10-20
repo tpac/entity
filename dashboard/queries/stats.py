@@ -2,10 +2,11 @@
 
 
 from ..clock import utc_cutoff
-from ..daemon_client import DAEMON_PORT, daemon_alive, daemon_send
+from ..daemon_client import DAEMON_PORT, daemon_alive
 from ..db import brain_db_path, direct_query, logs_db_path
 from ..log import warn
 from ._meta import WAKE_ENVELOPE_MARKER
+from .system import daemon_record
 
 
 def query_stats():
@@ -35,10 +36,10 @@ def query_stats():
     # dal_logs.conversational_turns_since: active session = latest s0 user
     # turn; anchor on that session's latest encoding_prompt; count s0
     # user_message turns since, excluding wake-envelope ignitions. The cadence
-    # is the one the running daemon read at start (its ping reports it) —
-    # None while the daemon is down.
-    ping = daemon_send("ping", timeout=3)
-    encode_every = (ping or {}).get('encode_every')
+    # is the one the running daemon read at start (its ping reports it,
+    # system.daemon_record carries it) — None while the daemon is down.
+    daemon = daemon_record()
+    encode_every = daemon.get('encode_every')
     enc_position = 0
     try:
         logs = logs_db_path()
@@ -72,7 +73,7 @@ def query_stats():
         "recent_24h": recent[0][0] if recent else 0,
         "orphans": orphans[0][0] if orphans else 0,
         "types": {t: cnt for t, cnt in types},
-        "daemon": "alive" if ping is not None else "unavailable",
+        "daemon": "alive" if daemon['alive'] else "unavailable",
         "encoding": {
             "turns_since": enc_position,
             "every": encode_every,

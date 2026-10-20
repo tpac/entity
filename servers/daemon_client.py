@@ -21,7 +21,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .daemon_config import (
-    _CODE_FINGERPRINT, _IS_WORKTREE, REPO_ROOT, DAEMON_HOST,
+    _CODE_FINGERPRINT, _IS_WORKTREE, REPO_ROOT, DAEMON_HOST, CLIENT_STAMP_KEY,
     get_daemon_addr, get_pid_path, get_lock_path,
     get_startup_lock_path,
     get_recovery_state_path, is_maintenance_mode, resolve_db_dir,
@@ -34,7 +34,8 @@ from .daemon_launch import (
 
 
 def send_command(cmd: str, args: Optional[Dict[str, Any]] = None,
-                 timeout: float = 10.0, port: Optional[int] = None) -> Dict[str, Any]:
+                 timeout: float = 10.0, port: Optional[int] = None,
+                 role: Optional[str] = None) -> Dict[str, Any]:
     """Send a command to the running daemon via TCP. Returns response dict.
 
     The ONE implementation of the daemon's wire protocol (connect, JSON +
@@ -42,8 +43,12 @@ def send_command(cmd: str, args: Optional[Dict[str, Any]] = None,
     restart CLI all route through it rather than hand-rolling a socket.
 
     A failure of the WIRE carries a `transport` key classifying it:
-    `timeout`, `refused`, `empty` (accepted then closed without replying) or
-    `protocol` (garbled read, reset, parse failure). Callers that must react
+    `timeout`, `refused`, `reset`, `empty` (accepted then closed without
+    replying) or `protocol` (garbled read, parse failure). `refused` and
+    `reset` mean the daemon never read the request: nothing listened, or the
+    request sat unread in the listen queue when the socket closed (a reload or
+    shutdown), and a socket closed with unread data resets. A daemon that read
+    the request and then closed reads as `empty`. Callers that must react
     differently per class read that key — never the prose in `error`, which is
     for humans and free to change. It is absent on success AND on a
     daemon-level ok=false, which is the daemon answering, not the wire failing.
@@ -51,6 +56,11 @@ def send_command(cmd: str, args: Optional[Dict[str, Any]] = None,
     `port` addresses a daemon other than this process's own: DAEMON_PORT is
     fixed from the environment at import, so one process driving several eval
     arms names each arm's port. The host stays DAEMON_HOST (loopback).
+
+    `role` (CLIENT_ROLE_HOOK / CLIENT_ROLE_MCP) stamps the request with this
+    copy's build identity — role, code fingerprint, root — beside cmd/args, for
+    the daemon's stale-copy check (dispatch_common.check_client_code). Callers
+    that are not an installed copy's hook or proxy pass none.
     """
     addr = (DAEMON_HOST, port) if port is not None else get_daemon_addr()
 
@@ -59,7 +69,11 @@ def send_command(cmd: str, args: Optional[Dict[str, Any]] = None,
 
     try:
         sock.connect(addr)
-        msg = json.dumps({"cmd": cmd, "args": args or {}}) + "\n"
+        req = {"cmd": cmd, "args": args or {}}
+        if role:
+            req[CLIENT_STAMP_KEY] = {"role": role, "fp": _CODE_FINGERPRINT,
+                                     "root": REPO_ROOT}
+        msg = json.dumps(req) + "\n"
         sock.sendall(msg.encode('utf-8'))
 
         # Read to the newline the daemon terminates every reply with.
@@ -98,6 +112,8 @@ def send_command(cmd: str, args: Optional[Dict[str, Any]] = None,
     except ConnectionRefusedError:
         return {"ok": False, "transport": "refused",
                 "error": "Connection refused — daemon may be dead"}
+    except ConnectionResetError as e:
+        return {"ok": False, "transport": "reset", "error": str(e)}
     except Exception as e:
         return {"ok": False, "transport": "protocol", "error": str(e)}
     finally:
@@ -549,7 +565,7 @@ def ensure_daemon(db_path: str) -> bool:
         # a stopped daemon's TIME_WAIT connections refuse too. A timeout or a
         # broken reply: something accepted and did not answer, a zombie on
         # whatever address it bound.
-        if resp.get("transport") in ("timeout", "empty", "protocol"):
+        if resp.get("transport") in ("timeout", "reset", "empty", "protocol"):
             sys.stderr.write("[brain-daemon] Port occupied but unresponsive — killing zombie\n")
             record_forced_restart("ensure_daemon: killing a zombie before spawning (%s)"
                                   % resp["transport"], db_path=db_path)

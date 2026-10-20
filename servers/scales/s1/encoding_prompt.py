@@ -33,12 +33,12 @@ Read the catalog first (the prior), then the timeline (the delta).
     → supersedes "{title of the node this one replaced}" (id:{its id} · {type} · {age})
       description: {the whole edge description}
 ```
-- `<timeline now="2026-08-17 14:32 UTC">` carries turns in lived order, newest last. `<other>` identifies my partner, human or agent; `<me>` is me. Each carries a real substrate `trace="…"` id. The free-text guide immediately before the timeline activates these rules.
+- `<timeline now="2026-08-17 14:32 UTC">` carries turns in lived order, newest last. `<other>` is my partner, human or agent, named by `name=` when the session declares who they are; `<me>` is me. What my partner relays — a pasted document, a letter from an earlier session of mine — keeps its own author. Other voices have elements of their own: `<harness>` for a notice the host composed, `<subagent>` for the report of work I delegated, `<session>` for another session of mine, `<brain>` for a note my memory delivered. They are evidence with a source, not my partner's words: I record what they report as reported, and the voice fields quote only what `<other>` and `<me>` said. Each carries a real substrate `trace="…"` id. The free-text guide immediately before the timeline activates these rules.
 
 ```
 <turn n="5" age="20m ago" encoded="false">
-  <other trace="a1b2c9e4">the recall keeps locking — can you check?</other>
-  <provenance>surfaced: "recall hot path is read-only" (id:3f2a8b47)</provenance>
+  <other name="Sam" trace="a1b2c9e4">the recall keeps locking — can you check?</other>
+  <provenance>surfaced: (id:3f2a8b47)</provenance>
   <me trace="c3d47f8a">Found it — the bg writer holds the lock through the whole batch…</me>
   <actions>
     Read: servers/brain.py
@@ -52,7 +52,7 @@ Read the catalog first (the prior), then the timeline (the delta).
 
 `<actions>` shows what I did, one cue per tool, without result payloads. Preserve the durable outcome, not a test or push as a node. Cuts announce themselves: `×N` repeats; `(N edit calls)` groups edits by caption — calls, not patches; `(N other actions grouped; details omitted: …)` covers routine actions and their files; `·` carries script intent, ` …` a trimmed body, `/…/` a shortened path. Edits, writes and closing actions remain, the last marked `Closing:` and counted apart. Within a turn the list is unordered; Git actions are filtered out, so absence is not evidence none ran. Actions can resolve what “my branch” refers to; their mere occurrence does not prove success.
 
-`<provenance>` carries only real refs, joined by ` | `: `surfaced`, `recalled(me)` and `archived(me)` carry `"title" (id:x)`, while `created(me)`, `revised(me)` and `encoded(me, turn N)` render the id alone, `(id:x)`. `surfaced` is context, not a link mandate; `encoded(me, turn N)` identifies prior writes at the covering run's last turn; `created(me)`, `revised(me)`, `recalled(me)`, `archived(me)` identify my direct work. Full bodies live in the catalog. Repeated appearances do not earn extra edges or source refs.
+`<provenance>` carries only real refs, joined by ` | `. A ref is the id alone, `(id:x)`, when that node has a catalog entry, where its full body is, and `"title" (id:x)` when it has none. `surfaced` is context, not a link mandate; `encoded(me, turn N)` identifies prior writes at the covering run's last turn; `created(me)`, `revised(me)`, `recalled(me)`, `archived(me)` identify my direct work; `searched(me)` is what my searches returned. Repeated appearances do not earn extra edges or source refs.
 
 Turn coordinates orient this reading, never stored memory. Bad: “Turn 5 finding.” Good: “bg writer holds the lock through the batch (2026-08-17).” Catalog violations are not models to imitate.
 

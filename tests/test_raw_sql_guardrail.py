@@ -69,7 +69,6 @@ PAIR_END_RE = re.compile(r"\be\.(?:source|target)_id\b")
 PAIR_END_ROOTS = (SERVERS, SERVERS.parent / 'dashboard' / 'queries')
 PAIR_END_EXCLUDE = {'dal_graph.py', 'schema.py'}
 PAIR_END_ALLOWED = {
-    'servers/brain_assembly.py': 5,               # neighbor ids either end; orphan check
     'servers/brain_recall.py': 2,                 # structural degree: both ends counted
     'servers/dal.py': 2,                          # EXISTS edge touching the node, either end
     'servers/scales/s2/community_decoder.py': 6,  # 1-hop neighbors either end; same-set internal-edge check

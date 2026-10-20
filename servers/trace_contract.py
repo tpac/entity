@@ -76,14 +76,31 @@ REF_THALAMUS_DELIVERY = "thalamus_delivery"
 # (broadcast, boot); never s0 (a filing is a run's act, not a turn's).
 REF_THALAMUS_FILED = "thalamus_filed"
 
+# The tool moment's record (memories at a file's first edit,
+# daemon_hooks.hook_pre_edit): one s1 K row per recall on the turn's s1r chain,
+# ref_id the JSON list of 8-char ids shown, `selected` their 'id8|title' lines,
+# `cue` what was recalled, `agent_id` the subagent that saw them ('' = the
+# session's own agent). Its own ref_type, not surface_selected: those rows are
+# what Haiku judged, and LAF supervision, S2 consolidation, the dashboard and
+# the evals read them as such — a recall's unjudged top results must not join
+# them, and Haiku stays free to pick a node the tool moment showed.
+REF_TOOL_SHOWN = 'tool_shown'
+TOOL_CUE_FIELD = 'cue'
+TOOL_AGENT_FIELD = 'agent_id'
+
 REF_TYPES = {
     # Scale 0: raw exchange
     ("s0", "K"):       ["user_message",
-                         "self_message",      # incoming turn from a stream of thought (self↔self),
+                         "self_message",      # incoming turn from another session of me (self↔self),
                                               # not the operator — same exchange, different correspondent
                          REF_THALAMUS_DELIVERY,  # Thalamus items rendered into this session (boot or
                                               # Stop — channels/delivery.py traces both legs); the
-                                              # brain speaking to its streams
+                                              # brain speaking to its sessions
+                         "env_message",       # what the harness composed into a prompt — a task
+                                              # notice, a scheduled run, a reminder glued to the
+                                              # operator's text (host_contract.read_prompt)
+                         "subagent_message",  # a subagent's report handed back to the session
+                                              # that delegated it (host_contract.read_prompt)
                          "heartbeat"],        # a /watch wakeup re-arm with no real input (no operator
                                               # prompt, empty inbox). Recorded for observability, but
                                               # NOT a conversational turn — see S0 TURN CLASSIFICATION.
@@ -109,6 +126,7 @@ REF_TYPES = {
                          "encoding_prompt",    # what the encoder was given
                          "scout_input"],       # retired with the scout muster; history rows read through it
     ("s1", "K"):       ["surface_selected",  # what the surfacer picked
+                         REF_TOOL_SHOWN,       # what the tool moment showed at a file's first edit
                          "node_catalog",       # which nodes available to encoder
                          "scout_findings"],    # retired with the scout muster; history rows read through it
     ("s1", "delta"):   ["additionalContext",       # what reached Anchor
@@ -196,10 +214,14 @@ REF_TYPES = {
 #   ──────────────────────────────────────────────────────────────────────────
 #   user_message        real operator prompt (hook_recall ran;     YES
 #                        last_user_activity reset this turn)
-#   self_message        inbound msg from another stream            no  (planned)
+#   self_message        inbound msg from another session           no  (planned)
 #                        (anchor↔anchor)
 #   thalamus_delivery   the brain's own due items rendered into    no  (planned)
 #                        this session (channels/delivery.py)
+#   env_message         what the harness composed into a prompt    YES
+#                        (host_contract.read_prompt)
+#   subagent_message    a delegated subagent's report, handed       YES
+#                        back through the prompt
 #   heartbeat           /watch wakeup re-arm, no real input        no  (never)
 #                        (no prompt + empty inbox)
 #
@@ -214,22 +236,124 @@ REF_TYPES = {
 #       True here; otherwise it stays a heartbeat. Flipping a row therefore
 #       makes the incoming message AND the reaction appear together.
 # The dial does NOT govern the S1 Scribe's CADENCE: turns_since_last_encode
-# counts s0 user_message rows only (dal_logs.conversational_turns_since,
-# hardcoded ref_type), so a flipped correspondent enters the conversation
-# cleanly without ticking encode cadence. Cadence is also distinct from
+# counts the CADENCE_REF_TYPES rows only (dal_logs.conversational_turns_since),
+# so a flipped correspondent enters the conversation cleanly without ticking
+# encode cadence. Cadence is also distinct from
 # stop_counter, the per-stop SEQUENCE number that advances on EVERY stop
 # (incl. heartbeats) so chain IDs stay unique. Non-conversational turns are
 # still written to S0 (for observability) but never drive or feed encoding.
 #
 # anchor↔anchor and brain↔anchor encoding are PLANNED capabilities, switched
-# OFF until the encoder prompt is taught the correspondent elements. The
-# single dial per correspondent is below. heartbeat stays False forever.
+# OFF until their flip-day checklist clears (docs/THALAMUS-ARCH-PLAN.md). The
+# harness and subagent rows are ON: they arrive through the prompt hook, so
+# each opens a turn that holds my reply, and a dial-off opener would leave
+# that reply grouped under the previous turn. Cadence counts the operator's
+# prompts and subagent reports only (CADENCE_REF_TYPES). The single dial per
+# correspondent is below; heartbeat stays False forever.
 S0_CONVERSATIONAL_INCOMING = {
     "user_message": True,
-    "self_message": False,        # another stream of me — flip to include anchor↔anchor turns
+    "self_message": False,        # another session of me — flip to include anchor↔anchor turns
     "thalamus_delivery": False,   # the brain's own items — flip to include brain↔anchor turns
+    "env_message": True,          # the harness's notices
+    "subagent_message": True,     # a delegated subagent's report
     "heartbeat":    False,        # a wakeup re-arm is never a turn
 }
+
+# Who speaks on each incoming side — the one ref_type → speaker map. Every
+# reader that must say who a turn's incoming row came from reads it: the
+# turn rule (joins_open_turn below decides which rows open a turn;
+# the speaker picks the element, MACHINE_SPEAKER_ELEMENTS), the embedding
+# text and the trace render's label. A new speaker is a row here plus its element. Not folded
+# into the dial: the dial says whether a speaker's turns are conversation,
+# this says who is speaking — a dial-off speaker still renders under its name.
+# heartbeat has no row: a re-arm carries no message.
+INCOMING_SPEAKERS = {
+    "user_message": "operator",
+    "self_message": "session",         # another session of me
+    "thalamus_delivery": "brain",      # the brain's own items
+    "env_message": "harness",          # the host's own notices
+    "subagent_message": "subagent",    # work I delegated, reporting back
+}
+
+# The row a piece of a prompt is written as, by the speaker the host contract
+# declared for it (host_contract.read_prompt). Only dial-on speakers: a piece
+# opens or rides in a turn, and a dial-off row drops out of the encoder's
+# timeline, leaving my reply grouped under the previous turn. A speaker whose
+# row is off (session, brain) cannot be declared for a prompt envelope until
+# its row is turned on.
+SPEAKER_REF_TYPES = {speaker: rt for rt, speaker in INCOMING_SPEAKERS.items()
+                     if S0_CONVERSATIONAL_INCOMING[rt]}
+
+# The element every speaker but the operator renders as, in every reader of
+# the conversation (the encoder timeline, the Surface window): one
+# vocabulary, so "not the operator" is structural and both prompts teach the
+# same names. The operator's element is each reader's own: the encoder writes
+# in first person (encoder_view: <other>, the partner it names), the Surface's
+# picker reads in third (surface_contract: <user>). A speaker reaches a reader
+# only once its dial row is on, and that reader's prompt is taught its
+# element before the flip.
+MACHINE_SPEAKER_ELEMENTS = {
+    'session': 'session',
+    'brain': 'brain',
+    'harness': 'harness',
+    'subagent': 'subagent',
+}
+
+# The host's own name for the turn an incoming row arrived in, as the prompt
+# hook read it from its payload (host_contract.read_turn) and the S0 write
+# door stamped it on every row of that prompt. A message the host absorbs
+# into a running turn carries the running turn's; a new prompt carries a new
+# one. Absent on rows from a client that predates it or a host that names no
+# turn.
+HOST_TURN_FIELD = 'host_turn'
+
+
+def _host_turn(row):
+    # A conversation row (get_conversation) carries it flat; an episode
+    # (recall_episodes) in its metadata.
+    turn = row.get(HOST_TURN_FIELD)
+    if turn is None and isinstance(row.get('metadata'), dict):
+        turn = row['metadata'].get(HOST_TURN_FIELD)
+    return turn or ''
+
+
+def joins_open_turn(row, opener):
+    """True when an incoming `row` rides in the turn `opener` opened instead
+    of opening its own — the one turn rule every reader that groups a
+    conversation into turns applies (the encoder's timeline and window count,
+    the Surface's conversation window, the LAF moment stack).
+
+    Only a row on the opener's s0 chain can join: a row on a new chain opens
+    its own turn (a Stop delivery opens the successor chain; so does a message
+    typed during a Stop-hook continuation, which the host may still name as
+    the earlier turn, though a Stop has already closed it). On that chain, a
+    session, brain or harness row joins — it arrived WITH that turn's
+    incoming side: a first-prompt delivery beside the operator's prompt, or
+    the second source of one composed Stop block. An operator row joins only
+    when the host named the same turn for both: a message typed mid-turn and
+    absorbed into it. Otherwise it opens its own — an interrupted turn puts
+    two operator prompts on one s0 chain, each its own turn, and a row with
+    no host turn (an older client, a host that names none) is read that way
+    too."""
+    if opener is None:
+        return False
+    chain = row.get('chain_id')
+    if not chain or chain != opener.get('chain_id'):
+        return False
+    if INCOMING_SPEAKERS.get(row.get('ref_type'), 'operator') == 'operator':
+        turn = _host_turn(row)
+        return bool(turn) and turn == _host_turn(opener)
+    return True
+
+# The rows that tick the S1 Scribe's encode cadence (dal_logs.
+# conversational_turns_since): the operator's prompts, and a subagent's
+# report — work I delegated, which was recorded as an operator prompt before
+# the prompt reader and fills the encoder's window the same way, so a run of
+# reports must still bring an encode due. Harness notices, session messages
+# and brain deliveries never do (ruling 2026-09-03: correspondents never
+# trigger or accelerate an encode). Rows written before the reader recorded
+# a notice as a user_message; the wake marker excludes those.
+CADENCE_REF_TYPES = ('user_message', 'subagent_message')
 
 # Flat ref_type set the encoder's conversation window (dal.get_session_turns)
 # selects: the conversational incoming types + the assistant response side.
@@ -268,21 +392,34 @@ DELIVERY_REACTION_WINDOW_MIN = 60
 # model produced the turn and which resolved host runtime it rides on.
 # Unlike human_identity / agent_identity — a
 # process-wide property stamped by TraceDAL from env — these vary PER SESSION
-# and per turn (one daemon serves streams on different models; a stream can
+# and per turn (one daemon serves sessions on different models; a session can
 # switch model mid-session), so they live on the SessionContext and are
 # stamped by the S0 write door (brain_traces.stamp_s0_session) from the ctx
 # the daemon resolved. Fed in by the UserPromptSubmit / Stop hooks
 # (hook_common.turn_model / host_tells): Codex puts `model` on every hook
 # payload; Claude Code exposes it only in the transcript's assistant entries.
 # The session row mirrors the LATEST value so presence can say which model a
-# stream is on right now; the per-turn truth is the S0 row.
+# session is on right now; the per-turn truth is the S0 row.
 S0_SESSION_STAMP_FIELDS = ('model', 'host')
 
-# Set True on a user_message row the recall hook registered without running
-# recall or surface (a short answer, a wake envelope — the client routes it
-# register_only). The turn stays conversational; readers that pair turns with
-# surface runs read this instead of re-deciding the client's rule.
+# The host-contract identity on a dialogue row a hook's contract reader
+# decided (host_contract.read_prompt for incoming rows, read_reply for the
+# assistant's): VOCAB_VERSION and contract_fingerprint() as the hook sent
+# them. A client that predates the reader sends neither, and its rows carry
+# no stamp.
+READER_STAMP_FIELDS = ('vocab_version', 'impl_identity')
+
+# Set True on the first incoming row of a prompt the recall hook registered
+# without running recall or surface (a short answer, a harness notice — the
+# client routes it register_only). The turn stays conversational; readers that
+# pair turns with surface runs read this instead of re-deciding the client's
+# rule.
 REGISTER_ONLY_FIELD = 'register_only'
+
+# An operator's text shorter than this (stripped) is recorded but not
+# recalled on — "yes", "ok", "no" carry no recall signal, and they are often
+# the highest-signal turns, so they are never dropped either.
+SHORT_ANSWER_MAX_LEN = 5
 
 
 # ── HOST NORMALIZATION VOCABULARY (the normalizer's OUTPUT) ──
@@ -304,7 +441,17 @@ HOST_STATUS = ('strong', 'family', 'ambiguous', 'unknown', 'legacy')
 # Per-envelope-tag policy values; `extract:<name>` names a registered pure
 # extractor in host_contract.EXTRACTORS (the registry is closed — a name with
 # no function is a contract violation, not a first-prompt KeyError).
-ENVELOPE_POLICIES = ('drop', 'keep', 'marker')
+# `machine`: the whole prompt is the declared speaker's — no operator side (a
+# task notification, a scheduled run); the envelope is recorded (the
+# harness's notice preamble before it is frame, left out), never recalled on. `drop`: a
+# block INSIDE an operator prompt that is cut out of the operator's text into
+# its own piece (a reminder the harness glued on). `keep`: the operator's own
+# text in a host wrapper, left as is. `marker`: the request boundary of a
+# structured prompt — declared, its split not built. `extract:<name>`: the
+# whole prompt is the declared speaker's and the extractor returns the texts
+# it reads out — one row each, recall reads the ones it marks for recall
+# together (host_contract.read_prompt applies all four).
+ENVELOPE_POLICIES = ('machine', 'drop', 'keep', 'marker')
 ENVELOPE_EXTRACT_PREFIX = 'extract:'
 
 
@@ -320,7 +467,7 @@ ENVELOPE_EXTRACT_PREFIX = 'extract:'
 OPERATOR_DIALOGUE_REF_TYPES = ("user_message", "assistant_message")
 
 # Presence LIVENESS — operator dialogue PLUS heartbeat. A watch listener living
-# purely on heartbeats is the most reachable stream there is, so a heartbeat
+# purely on heartbeats is the most reachable session there is, so a heartbeat
 # proves this session can be reached (B2, 2026-06-04).
 #
 # It does NOT prove work happened, so this set answers "can it be reached", never
@@ -337,14 +484,13 @@ PRESENCE_LIVE_REF_TYPES = OPERATOR_DIALOGUE_REF_TYPES + ("heartbeat",)
 SAID_AND_DID_REF_TYPES = CONVERSATIONAL_REF_TYPES + ("tool_result",)
 
 
-# A wakeup ignite (e.g. a background-task notification) arrives as turn CONTENT,
-# not a distinct ref_type: it runs recall, so it's recorded as a `user_message`
-# (conversational) even though it's an ENVELOPE, not work. Presence focus skips
-# any conversational turn whose summary starts with this marker. One constant so
-# the skip is defined ONCE, not reproduced as a scattered SQL literal — the
-# predicate below reads it too. Claude Code's envelope tag; it moves into the
-# host contract's envelope table when the boundary classifies envelopes
-# (docs/HOST-CONTRACT-DESIGN.md step 3).
+# Rows written before the prompt reader (host_contract.read_prompt) recorded a
+# wakeup ignite (a background-task notification) as a `user_message` whose
+# summary opens with this marker; the reader now writes it as an env_message.
+# Readers of those older rows — presence focus and ranking, Haiku's window,
+# the cadence count, the LAF moment stack — still skip it by this marker. One
+# constant so the skip is defined ONCE, not reproduced as a scattered SQL
+# literal — the predicate below reads it too.
 WAKE_ENVELOPE_MARKER = "<task-notification>"
 
 
@@ -357,6 +503,92 @@ def is_machine_turn(op_text) -> bool:
     eval (eval/laf/walker/extract.py imports this) so the filter can't drift;
     production's recall hook routes these register_only (node b2953766)."""
     return WAKE_ENVELOPE_MARKER in (op_text or '')
+
+
+def row_text(row):
+    """The full text of a conversation row — the one accessor every render
+    reads: the store-capped body in metadata['content'], else the summary
+    excerpt (tool rows carry their cue there). A get_conversation row carries
+    the body flat as `content`."""
+    if row.get('content') is not None:
+        return row['content'] or ''
+    meta = row.get('metadata')
+    body = meta.get('content') if isinstance(meta, dict) else None
+    return body or row.get('summary') or ''
+
+
+def row_speaker(row):
+    """Who an incoming row is from, as its reader should present it: the
+    INCOMING_SPEAKERS speaker of its ref_type, except that an operator row
+    opening with WAKE_ENVELOPE_MARKER is the harness's — a background-task
+    notice an older hook copy recorded as the operator's (the reader writes
+    those as env_message now). None for a row that is not incoming. The one
+    answer every render of the conversation asks; the turn rule
+    (joins_open_turn) keeps reading ref_type, so where a legacy row's turn
+    starts never moves."""
+    speaker = INCOMING_SPEAKERS.get(row.get('ref_type'))
+    if speaker == 'operator' and row_text(row).startswith(WAKE_ENVELOPE_MARKER):
+        return 'harness'
+    return speaker
+
+
+def group_turns(rows):
+    """Group oldest-first conversation rows into turns — the one grouping
+    every reader of the conversation shares (brain_traces.conversation_turns
+    serves it to the encoder timeline, the Surface window and the LAF moment
+    stack).
+
+    Returns [{'user', 'with', 'assistant', 'actions'}]: `user` holds the
+    incoming row that opened the turn, whichever speaker sent it; `with` the
+    incoming rows that joined it (joins_open_turn); `assistant` the reply;
+    `actions` the tool_result rows before the next opening row. The reply and
+    actions belong to the open turn, so a reaction to a delivery lands in the
+    delivery's turn, never over the previous turn's reply. A leading
+    non-incoming row (the first rows of a page that cut a turn, or history
+    from before its prompt was recorded) opens an orphan turn with no `user`,
+    so nothing is dropped here; the reader decides what to keep."""
+    turns = []
+    cur = None
+    for row in rows:
+        rt = row.get('ref_type')
+        if rt in INCOMING_SPEAKERS:
+            if joins_open_turn(row, cur and cur['user']):
+                cur['with'].append(row)
+                continue
+            cur = {'user': row, 'with': [], 'assistant': None, 'actions': []}
+            turns.append(cur)
+            continue
+        if cur is None:
+            cur = {'user': None, 'with': [], 'assistant': None, 'actions': []}
+            turns.append(cur)
+        if rt == 'assistant_message':
+            cur['assistant'] = row
+        elif rt == 'tool_result':
+            cur['actions'].append(row)
+    return turns
+
+
+def turn_incoming(turn):
+    """A group_turns turn's incoming rows in arrival order: its opener, then
+    the rows that joined it."""
+    return ([turn['user']] if turn['user'] else []) + turn['with']
+
+
+def turn_opened_at(turn):
+    """When a group_turns turn opened: its first row's created_at (an
+    orphan turn's reply or first action)."""
+    first = turn['user'] or turn['assistant'] or (turn['actions'] or [None])[0]
+    return (first or {}).get('created_at') or ''
+
+
+# brain_traces.conversation_turns reads the conversation newest-first in
+# pages: TURN_READ_ROWS_PER_TURN rows per wanted turn to start (an operator
+# turn is about three conversational rows: the prompt, the status note riding
+# with it, the reply), doubling until the window holds its turns, never past
+# TURN_READ_MAX_ROWS. A read with tool rows starts at the maximum: one turn
+# can hold dozens of them.
+TURN_READ_ROWS_PER_TURN = 8
+TURN_READ_MAX_ROWS = 500
 
 
 # ── CHAIN ID CONVENTIONS ──
@@ -374,6 +606,30 @@ CHAIN_PREFIXES = {
     "s3":         "s3-{date}-{operation}",             # date=YYYYMMDD, operation=synthesis/meta/etc
     "s4":         "s4-{date}-{topic}",                 # date=YYYYMMDD, topic=what was researched
 }
+
+# Length of {session_short}. Chain ids are read by chain_id alone (get_chain,
+# the judge_output join, payload dirs), so the short must not collide across
+# sessions — 12 hex characters of the id's random tail do not in practice.
+SESSION_SHORT_CHARS = 12
+
+
+def session_short(session_id):
+    """The short a session is named by everywhere — its s0/s1r/s1e chain ids,
+    log lines, presence, self-channel messages and addresses, trace headers:
+    the LAST SESSION_SHORT_CHARS characters of the id with its hyphens removed.
+    For a real session id (a UUID, on both hosts) that is exactly the part
+    after its last hyphen.
+
+    The end, not the start: Codex ids are UUIDv7, whose leading characters
+    are a millisecond timestamp shared by every chat opened in the same
+    minute, while both hosts' UUIDs end in random bits (for a UUID this is
+    exactly its last group). Hyphens go first because chain parsers split on
+    '-' and read the parts by position (recall_laf and the eval/laf walkers
+    take parts[1], dashboard traces.js p[2]; parse_chain and activity.js
+    match [^-]+); a non-UUID id shorter than the cut comes back whole — no
+    reader counts the length. Chain writers, payload finders and log lines
+    naming a session all derive from here; never rebuild it by hand."""
+    return (session_id or '').replace('-', '')[-SESSION_SHORT_CHARS:]
 
 
 def scale_for_chain(chain_id):
@@ -1114,7 +1370,11 @@ JOURNAL_ADDRESSED_INSTRUCTION = (
     "settle.\n"
     "Interrupt only when it touches the present work, would change it, and "
     "is worth the stop; otherwise it's a plain note.\n"
-    "Plain words, for a reader with none of your context. One line per "
+    "Each stands on its own: the project, and what happened or what's "
+    "open — e.g. \"Brain project: the eval handoff letter (67da637a) "
+    "didn't answer its own four orientation questions; all four needed the "
+    "code. Should letters carrying KPI tables answer them on read alone?\"\n"
+    "One line per "
     "subject — sending the same subject again updates that message, no "
     "subject means the run "
     "itself, `resolved %(d)s subject %(d)s why` withdraws it. Next run, "
@@ -2200,7 +2460,7 @@ def render_trace(row, config=None):
     if not isinstance(meta, dict):
         meta = {}
 
-    sid = (row.get('session_id') or '')[:8]
+    sid = session_short(row.get('session_id'))
     score = row.get('_score')
     score_str = ' %.2f' % score if isinstance(score, (int, float)) else ''
     ref_type = row.get('ref_type') or ''
@@ -2214,6 +2474,8 @@ def render_trace(row, config=None):
         label = meta.get('agent_identity') or get_agent_name()
     elif ref_type == 'user_message':
         label = meta.get('human_identity') or 'Operator'
+    elif ref_type in INCOMING_SPEAKERS:
+        label = INCOMING_SPEAKERS[ref_type]
     elif ref_type == 'tool_result':
         label = meta.get('tool') or 'tool_result'
     else:

@@ -13,6 +13,8 @@ import hashlib
 import hmac
 import os
 import re
+import threading
+import time
 from typing import Any, Dict, Callable, Optional, NamedTuple
 
 from servers.brain_constants import user_config_dir
@@ -20,11 +22,12 @@ from servers.contract import unwrap_operations
 
 
 # Reserved arg key: the calling session's identity, stamped by the MCP proxy
-# (brain_mcp.daemon_send) on every tool call it can attribute, under its OWN
-# name — never as `session_id`. Identity handlers (attribution / per-session
-# state) resolve the caller via caller_session(); cross-session FILTER reads
-# (recall_episodes, query_traces) read the caller-supplied `session_id` only,
-# so an absent scope means "all streams" by design — never the calling session.
+# (brain_mcp.daemon_send) on every tool call — empty when the host gave it
+# none — under its OWN name, never as `session_id`. Identity handlers
+# (attribution / per-session state) resolve the caller via caller_session();
+# cross-session FILTER reads (recall_episodes, query_traces) read the
+# caller-supplied `session_id` only, so an absent scope means "all sessions" by
+# design — never the calling session.
 CALLER_SESSION_KEY = "_caller_session"
 
 # Reserved arg key: the HMAC that lets the proxy trust a `_caller_session` it
@@ -120,14 +123,21 @@ def verify_caller_session(session_id, signature):
 def caller_session(args):
     """The calling session's identity, for attribution / per-session state.
 
-    Explicit caller-supplied `session_id` wins (the few write/self tools that
-    surface it in their schema); otherwise the ambient session the MCP proxy
-    stamped under `_caller_session`. Returns '' when neither is present.
+    A stamped `_caller_session` IS the identity — written by the MCP proxy
+    from the host, by the in-process encoder from the unit it runs for, by
+    brain_batch from the batch's caller. Present but empty is an identity
+    too: an S2 unit is sessionless, a proxy call the host gave no identity is
+    anonymous, and a session_id the model writes cannot give either one.
+    `session_id` counts only HEADLESS, when no stamp key was written at all —
+    hooks and pollers on daemon_client, which never pass through the proxy.
+    Returns '' when neither is present.
 
     Do NOT use for cross-session FILTER reads — those read
-    `args.get('session_id')` directly so an omitted scope means all streams.
+    `args.get('session_id')` directly so an omitted scope means all sessions.
     """
-    return args.get('session_id') or args.get(CALLER_SESSION_KEY) or ''
+    if CALLER_SESSION_KEY in args:
+        return args[CALLER_SESSION_KEY] or ''
+    return args.get('session_id') or ''
 
 
 def sender_id(args):
@@ -135,15 +145,121 @@ def sender_id(args):
 
     The authoritative id (`caller_session` — the proxy-stamped full session) WINS
     over an explicit `from_session` arg. That ordering is the fix, not an accident:
-    a caller can pass `from_session` as the 8-char SHORT (the form Anchor sees in
+    a caller can pass `from_session` as its SHORT (the form Anchor sees in
     rendered messages and presence lines), and storing a short corrupts attribution
     and seeds the self_send resolver's false-ambiguity — the courier ends up
-    holding one stream under two id formats (db79e0c1 / brain node 41c6ebed). The
-    explicit arg is honored only HEADLESS, when the proxy stamped no caller session.
+    holding one session under two id formats (db79e0c1 / brain node 41c6ebed). The
+    explicit arg is honored only HEADLESS, when no stamp key was written."""
+    sid = caller_session(args)
+    if sid or CALLER_SESSION_KEY in args:
+        return sid
+    return args.get('from_session', '') or ''
 
-    Distinct from `caller_session`, which keeps the raw `session_id`-first
-    precedence the read tools that scope BY an explicit id rely on."""
-    return caller_session(args) or args.get('from_session', '') or ''
+
+class ClientCodeWatch:
+    """What the stale-copy check has seen in this daemon run: the first
+    sighting of each copy, the (session, copy) pairs already logged, and when
+    each stale hook copy's notice was last filed. Lives on the daemon instance,
+    so a reload starts fresh."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.first_seen = {}
+        self.reported = set()
+        self.noticed = {}
+        self.unknown_logged = False
+
+
+_STALE_SOURCE = 'daemon:client_check'
+
+
+def _stale_notice(root):
+    """The plain-language notice for a stale hook copy — where it is, and the
+    fix for each way such a copy comes to exist."""
+    where = ("Entity's hooks at %s run" % root if root else
+             "An older installed copy of Entity runs hooks that predate its "
+             "build check, so they run")
+    return (where + " different code from Entity's background service. Usually "
+            "one of them was updated and the other was not. To fix it, update or "
+            "re-upload Entity in the app that uses that copy (or remove the old "
+            "copy), then start a new session.")
+
+
+def check_client_code(brain, cmd, args, client, watch, hook_commands,
+                      daemon_fp=None, now=None):
+    """The daemon door's stale-copy check: does the copy that sent this
+    request run the daemon's code? Never blocks or alters the request.
+
+    A stamp (daemon_client.send_command `role=`) whose fingerprint differs
+    from the daemon's is stale. A request without one is judged only when its
+    command is a hook command: an installed copy from before the stamp. Dev
+    scripts, evals and the CLI send no stamp and no hook command, so they are
+    never checked; neither is a stamp whose own fingerprint is unknown.
+
+    A copy is reported only STALE_CLIENT_GRACE_S after its first sighting —
+    redeploy updates copies one after another. Then: one errors row per
+    (session, copy), the key in context so the dedup window cannot merge
+    sessions; and for a hook copy, one Thalamus notice to every session per
+    copy, refreshed while it keeps calling. A stale proxy gets the errors row
+    only: a session opened before a redeploy keeps its proxy by design.
+
+    Returns the verdict for a stale copy, else None."""
+    from servers import daemon_config as dcfg
+    daemon_fp = daemon_fp or dcfg._CODE_FINGERPRINT
+    now = time.monotonic() if now is None else now
+    if brain is None:   # the daemon is still loading — nothing to report into
+        return None
+    if isinstance(client, dict):
+        fp, role = client.get('fp'), client.get('role')
+        if (role not in (dcfg.CLIENT_ROLE_HOOK, dcfg.CLIENT_ROLE_MCP)
+                or not fp or fp in ('unknown', daemon_fp)):
+            return None
+        root = client.get('root') or '?'
+        key = '%s@%s' % (fp, root)
+    elif cmd in hook_commands:
+        role, root, fp, key = dcfg.CLIENT_ROLE_HOOK, '', '', 'unstamped'
+    else:
+        return None
+    if daemon_fp == 'unknown':
+        with watch.lock:
+            first, watch.unknown_logged = not watch.unknown_logged, True
+        if first:
+            brain._log_warning(_STALE_SOURCE, 'the daemon\'s code fingerprint is '
+                               'unknown — the stale-copy check is off this run')
+        return None
+    sid = caller_session(args) if isinstance(args, dict) else ''
+    with watch.lock:
+        if now - watch.first_seen.setdefault(key, now) < dcfg.STALE_CLIENT_GRACE_S:
+            return None
+        report = (sid, key) not in watch.reported
+        watch.reported.add((sid, key))
+        notice = role == dcfg.CLIENT_ROLE_HOOK and (
+            key not in watch.noticed
+            or now - watch.noticed[key] >= dcfg.STALE_CLIENT_NOTICE_REFRESH_S)
+        if notice:
+            watch.noticed[key] = now
+    if report:
+        brain._log_error(
+            _STALE_SOURCE,
+            'stale %s copy: runs %s, the daemon runs %s' % (role, fp or 'no build stamp', daemon_fp),
+            context='session=%s copy=%s cmd=%s' % (sid or '?', key, cmd),
+            session_id=sid or None)
+    if notice:
+        from servers.channels.thalamus import thalamus
+        try:
+            r = thalamus.file(brain, _STALE_SOURCE, _stale_notice(root), for_whom='all',
+                              dedup_key='stale-copy:' + key,
+                              expires=dcfg.STALE_CLIENT_NOTICE_EXPIRES)
+        except Exception as e:
+            r = {'ok': False, 'error': str(e)}
+        if not r.get('ok'):
+            with watch.lock:   # not filed: the copy's next call tries again
+                watch.noticed.pop(key, None)
+            notice = False
+            brain._log_warning(_STALE_SOURCE, 'stale-copy notice not filed: %s'
+                               % r.get('error'), context='copy=%s' % key)
+    return {'key': key, 'role': role, 'session': sid,
+            'reported': report, 'noticed': notice}
 
 
 def _agent_limit(req, default, ceiling):

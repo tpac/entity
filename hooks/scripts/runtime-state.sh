@@ -26,6 +26,11 @@
 #
 # Usage: brain_runtime_ready "$PLUGIN_ROOT" && echo warm
 
+# The runtime as top-level entries of the plugin dir: what ensure-runtime.sh
+# creates and no package carries. A deployer that swaps in a new package tree
+# moves these across (redeploy.sh).
+BRAIN_RUNTIME_ARTIFACTS="bin py venvs venv .runtime-ready"
+
 brain_runtime_fingerprint() {
     { cat "$1/uv.lock" "$1/.python-version" 2>/dev/null || true; } | cksum
 }

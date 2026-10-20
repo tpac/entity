@@ -11,7 +11,9 @@ See docs/S1-SCRIBE-REDESIGN.md §10.3.2.
 import os
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import pytest
+
+ROOT =os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
@@ -562,18 +564,24 @@ def _msg(ref_type, tid, stop, content, ts):
             'summary': content[:60], 'created_at': ts, 'metadata': {'content': content}}
 
 
+def _window(eps):
+    """The episodes grouped into the encoder's window, oldest first — what
+    encode._window hands the render (the whole conversation here)."""
+    from servers.trace_contract import group_turns
+    return group_turns(sorted(eps, key=lambda e: e['created_at']))
+
+
 class _ProvBrain:
-    """A brain stub that serves BOTH doors the lived timeline needs: episodes
-    (recall_episodes) for the turns, and query_traces for gather()."""
+    """A brain stub for the timeline's provenance: query_traces serves
+    gather(); the turns come from _window."""
     def __init__(self, episodes, surface_traces, encode_traces):
         self._episodes = episodes
         self._surface = surface_traces
         self._encode = encode_traces
 
-    def recall_episodes(self, **kw):
-        rts = kw.get('ref_type') or []
-        eps = [e for e in self._episodes if e.get('ref_type') in rts] if rts else self._episodes
-        return {'episodes': eps, 'ranked_by': 'time', 'truncated': False}
+    def speaker_for(self, session_id, ref_type):
+        # An install that declares no counterpart: no speaker is named.
+        return ''
 
     def query_traces(self, **kw):
         if kw.get('ref_type') == 'surface_selected':
@@ -598,7 +606,6 @@ _EPS = [
 ]
 _SURF = [_surface(5, ['nodeAAAA1111', 'nodeBBBB2222'])]
 _ENC = [_encode(7, ['nodeCCCC3333'], [], tid='run7')]
-_FOUR_MSGS = [{'role': 'user'} for _ in range(4)]  # window = 4 user turns
 
 
 def test_turns_carry_encoded_attr_and_frontier_ids():
@@ -606,7 +613,7 @@ def test_turns_carry_encoded_attr_and_frontier_ids():
     # REAL refs — no ✓ marker. The frontier turn still shows
     # the owning run's full id-list, once.
     brain = _ProvBrain(_EPS, _SURF, _ENC)
-    out = _render_lived_sequence_timeline(brain, 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(_EPS))
     assert '<turn n="1" encoded="true">' in out       # covered turns say so
     assert '<turn n="2" encoded="true">' in out       # frontier is also covered
     assert '<turn n="3" encoded="false">' in out      # first turn PAST the run
@@ -622,7 +629,7 @@ def test_turns_carry_encoded_attr_and_frontier_ids():
 
 def test_provenance_unencoded_tail_has_no_encoded_marker():
     brain = _ProvBrain(_EPS, _SURF, _ENC)
-    out = _render_lived_sequence_timeline(brain, 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(_EPS))
     t8 = out.split('<turn n="4"')[1].split('</turn>')[0]
     # turn 8 is past the last run → no encoded marker at all (the boundary)
     assert 'encoded(S1S)' not in t8
@@ -635,7 +642,7 @@ def test_provenance_edge_only_run_renders_no_marker_but_attr_says_covered():
     # is [] even though encoded_by is set. No provenance marker renders (nothing
     # to dereference), but the turn attr still states coverage.
     enc = [_encode(7, [], [], tid='run7')]  # edge-only run
-    out = _render_lived_sequence_timeline(_ProvBrain(_EPS, [], enc), 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(_ProvBrain(_EPS, [], enc), 'sess', _window(_EPS))
     assert 'encoded(S1S)' not in out                   # no marker at all
     assert '✓' not in out
     assert 'id:' not in out                            # nothing to dereference
@@ -656,8 +663,7 @@ def test_encoded_turns_keep_full_text():
         _msg('assistant_message', 'a6', 6, 'reply six', '2026-06-29T00:00:04'),
     ]
     enc = [_encode(6, ['nodeCCCC3333'], [], tid='run6')]   # covers stop 5 only (6 > 5)
-    msgs = [{'role': 'user'} for _ in range(2)]
-    out = _render_lived_sequence_timeline(_ProvBrain(eps, [], enc), 'sess', msgs)
+    out = _render_lived_sequence_timeline(_ProvBrain(eps, [], enc), 'sess', _window(eps))
     t5 = out.split('<turn n="1"')[1].split('</turn>')[0]
     t6 = out.split('<turn n="2"')[1].split('</turn>')[0]
     u5 = t5.split('<other')[1].split('</other>')[0]
@@ -669,7 +675,7 @@ def test_encoded_turns_keep_full_text():
 def test_provenance_never_leaks_encoding_source():
     # encoding_source is technical + in-flux; it must never reach the encoder.
     brain = _ProvBrain(_EPS, _SURF, _ENC)
-    out = _render_lived_sequence_timeline(brain, 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(_EPS))
     assert 'encoding_source' not in out and 'src:' not in out
     assert 'encoder:' not in out and 'anchor' not in out
 
@@ -718,7 +724,7 @@ def test_provenance_renders_tag_titles_on_refs():
     titles = {'nodeAAAA1111': 'recall hot path is read-only',
               'nodeBBBB2222': 'batch commit gate'}
     brain = _ProvBrainFull(_EPS, _SURF, _ENC, [], titles)
-    out = _render_lived_sequence_timeline(brain, 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(_EPS))
     t5 = out.split('<turn n="1"')[1].split('</turn>')[0]
     assert 'surfaced: id:nodeAAAA «recall hot path is read-only» id:nodeBBBB «batch commit gate»' in t5
 
@@ -731,25 +737,53 @@ def test_provenance_renders_merged_encoded_label_when_authored_and_omits_when_em
     touched = [_touched(8, created=['nodeDDDD4444'])]
     titles = {'nodeDDDD4444': 'mid-turn insight'}
     brain = _ProvBrainFull(_EPS, _SURF, _ENC, touched, titles)
-    out = _render_lived_sequence_timeline(brain, 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(_EPS))
     t5, t8 = (out.split('<turn n="%d"' % n)[1].split('</turn>')[0] for n in (1, 4))
     assert 'encoded(me): id:nodeDDDD «mid-turn insight»' in t8       # filled at turn 8
     assert 'encoded(me):' not in t5                                  # omitted elsewhere
     assert out.count('encoded(me):') == 1                            # exactly the one turn
 
 
+@pytest.mark.parametrize('view_policy', [False, True])
+def test_turns_sharing_a_stop_show_its_provenance_once_on_the_last(view_policy):
+    # Several prompts before one reply share a chain stop, and the link join is
+    # by stop, so every turn on it holds the same refs. The line renders once,
+    # on the stop's last turn; the earlier turns keep their messages, no line.
+    eps = [
+        # stop 5: two operator prompts, then the reply (an interrupted turn)
+        _msg('user_message', 'u5a', 5, 'first ask', '2026-06-29T00:00:01'),
+        _msg('user_message', 'u5b', 5, 'and another thing', '2026-06-29T00:00:02'),
+        _msg('assistant_message', 'a5', 5, 'both done', '2026-06-29T00:00:03'),
+        # stop 6: a subagent's report opens it, the operator answers on it
+        _msg('subagent_message', 'r6', 6, 'report: two findings', '2026-06-29T00:00:04'),
+        _msg('user_message', 'u6', 6, 'fix the first', '2026-06-29T00:00:05'),
+        _msg('assistant_message', 'a6', 6, 'fixed', '2026-06-29T00:00:06'),
+    ]
+    surf = [_surface(5, ['nodeAAAA1111']), _surface(6, ['nodeBBBB2222'])]
+    enc = [_encode(6, ['nodeCCCC3333'], [], tid='run6')]   # covers stop 5
+    touched = [_touched(5, created=['nodeDDDD4444'])]
+    brain = _ProvBrainFull(eps, surf, enc, touched, {})
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(eps),
+                                          view_policy=view_policy)
+
+    turns = out.split('</turn>')[:-1]
+    assert ['<provenance>' in t for t in turns] == [False, True, False, True]
+    assert 'trace="u5a"' in turns[0] and 'trace="u5b"' in turns[1]
+    assert 'nodeAAAA' in turns[1] and 'nodeDDDD' in turns[1]   # the stop's refs
+    assert 'nodeCCCC' in turns[1]                     # the run's list, on its last turn
+    assert 'trace="r6"' in turns[2] and 'nodeBBBB' in turns[3]
+    for nid in ('nodeAAAA', 'nodeBBBB', 'nodeCCCC', 'nodeDDDD'):
+        assert out.count(nid) == 1
+
+
 def test_timeline_degrades_to_piece1_when_provenance_unavailable():
     # A brain with no query_traces (the piece-1 stub shape) → guarded fallback:
     # the timeline still renders, just without any <provenance> line.
     class _NoDoor:
-        def __init__(self, eps):
-            self._eps = eps
+        def speaker_for(self, session_id, ref_type):
+            return ''
 
-        def recall_episodes(self, **kw):
-            rts = kw.get('ref_type') or []
-            return {'episodes': [e for e in self._eps if e.get('ref_type') in rts]}
-
-    out = _render_lived_sequence_timeline(_NoDoor(_EPS), 'sess', _FOUR_MSGS)
+    out = _render_lived_sequence_timeline(_NoDoor(), 'sess', _window(_EPS))
     assert '<turn n="1">' in out and '<provenance>' not in out
     # coverage unknown on the degraded path → no encoded attr either
     assert 'encoded=' not in out

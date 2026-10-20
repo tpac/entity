@@ -19,7 +19,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from tests.brain_test_base import BrainTestBase
+from tests.brain_test_base import BrainTestBase, turns_of
 
 
 class TestDecodeTransitions(BrainTestBase):
@@ -246,10 +246,10 @@ class TestDecodeTransitions(BrainTestBase):
         prompt, max_tokens = build_surface_prompt(
             candidates,
             user_message='how do we deploy to production?',
-            recent_messages=[
+            recent_turns=turns_of([
                 {'role': 'user', 'content': 'tell me about our deploy process'},
                 {'role': 'assistant', 'content': 'Let me check the brain for deployment info.'},
-            ],
+            ]),
         )
 
         self.assertIsInstance(prompt, str)
@@ -271,23 +271,23 @@ class TestDecodeTransitions(BrainTestBase):
         written at prompt-arrival, so upstream excludes the current chain and
         this function renders `user_message` ONLY in the "Current message"
         block — never appended to the history window (which duplicated it
-        and ate a history slot). Window = SURFACE['recent_messages'] previous
-        messages, newest kept.
+        and ate a history slot). Window = SURFACE['recent_turns'] previous
+        turns, newest kept.
         """
         from servers.scales.s1.surface_contract import build_surface_prompt, SURFACE
 
-        window = SURFACE['recent_messages']
-        # More history than the window holds — oldest must fall off.
+        window = SURFACE['recent_turns']
+        # More turns than the window holds — the oldest must fall off whole.
         # Zero-padded labels: 'message 01' must never be a substring of
         # 'message 010' if the window config grows past single digits.
         history = []
         for i in range(window + 2):
-            role = 'user' if i % 2 == 0 else 'assistant'
-            history.append({'role': role, 'content': 'history message %03d' % i})
+            history.append({'role': 'user', 'content': 'history message %03d' % (2 * i)})
+            history.append({'role': 'assistant', 'content': 'history message %03d' % (2 * i + 1)})
 
         current = 'CURRENT-PROMPT-SENTINEL what changed in the deploy?'
         prompt, _ = build_surface_prompt([], user_message=current,
-                                         recent_messages=history)
+                                         recent_turns=turns_of(history))
 
         # Exactly one occurrence, on the turn marked current. (Asserted the
         # legacy "Current message" block until 2026-09-21; the invariant is
@@ -299,11 +299,12 @@ class TestDecodeTransitions(BrainTestBase):
                            'current prompt must render on the current turn')
         self.assertIn('<conversation>', prompt)
 
-        # Window slice: newest `window` messages kept, oldest dropped.
-        self.assertNotIn('history message 000', prompt)
-        self.assertNotIn('history message 001', prompt)
-        self.assertIn('history message 002', prompt)
-        self.assertIn('history message %03d' % (window + 1), prompt)
+        # Window slice: newest `window` turns kept whole, the oldest two dropped
+        # whole — never a reply without its prompt.
+        for i in range(4):
+            self.assertNotIn('history message %03d' % i, prompt)
+        self.assertIn('history message 004', prompt)
+        self.assertIn('history message %03d' % (2 * window + 3), prompt)
 
     def test_xml_layout_structure(self):
         """layout='xml_v13': turn grouping, current_msg last, <shown> dedup,
@@ -323,12 +324,15 @@ class TestDecodeTransitions(BrainTestBase):
             {'role': 'user', 'content': 'lets fix the window',
              'surfaced': [{'id': 'aaaabbbb', 'title': 'window fix decision'}]},
             {'role': 'assistant', 'content': 'Done, tests green.'},
-            {'role': 'assistant', 'content': 'lone assistant (envelope-filtered user half)'},
+            # A turn the harness opened: its notice renders under <harness>,
+            # then the reply.
+            {'ref_type': 'env_message', 'content': 'background command completed'},
+            {'role': 'assistant', 'content': 'reply to the harness-opened turn'},
             {'role': 'user', 'content': 'now the XML restructure'},
         ]
         prompt, _ = build_surface_prompt(
             [candidate], user_message='CURRENT-XML-SENTINEL ready to eval?',
-            recent_messages=history)
+            recent_turns=turns_of(history))
 
         # Structure: all four turn groups render; current turn is last and marked.
         self.assertIn('<conversation>', prompt)
@@ -344,8 +348,9 @@ class TestDecodeTransitions(BrainTestBase):
         self.assertIn('<shown id="aaaabbbb"/>', prompt)
         self.assertNotIn('window fix decision</shown>', prompt)
 
-        # Lone assistant gets its own turn (no strict alternation assumption).
-        self.assertIn('<assistant>lone assistant', prompt)
+        # The harness-opened turn shows what opened it, then the reply.
+        self.assertIn('<turn n="2">\n<harness>background command completed</harness>\n'
+                      '<assistant>reply to the harness-opened turn</assistant>', prompt)
 
         # Candidates: id attribute, no score floats, no legacy #N header.
         short_id = str(candidate['id'])[:8]
@@ -356,6 +361,102 @@ class TestDecodeTransitions(BrainTestBase):
         # Legacy sections must not leak into the XML layout.
         self.assertNotIn('Recently surfaced', prompt)
         self.assertNotIn('Query type:', prompt)
+
+    def test_message_absorbed_mid_turn_renders_in_its_turn(self):
+        """A message the host absorbed into a running turn (same host_turn as
+        the prompt that opened it) is one turn with that prompt: both <user>
+        elements, the turn's <shown> once, then my reply. A prompt the host
+        named as a new turn (after an interrupt) and a row with no host turn
+        each open their own, as before."""
+        import re
+        from servers.scales.s1.surface_contract import build_surface_prompt, SURFACE
+
+        def user(text, chain, turn, shown=()):
+            # A turn's rows share its s1r chain, so get_session_turns gives
+            # each the same surfaced union.
+            return {'role': 'user', 'ref_type': 'user_message', 'chain_id': chain,
+                    'host_turn': turn, 'content': text,
+                    'surfaced': [{'id': i, 'title': ''} for i in shown]}
+        history = [
+            user('look into the grouping', 's0-x-0', 'p1', ['aaaa1111', 'bbbb2222']),
+            user('also the Surface window', 's0-x-0', 'p1', ['aaaa1111', 'bbbb2222']),
+            {'role': 'assistant', 'content': 'one rule now'},
+            user('delete the old folder', 's0-x-1', 'p2'),
+            user('wait, list it first', 's0-x-1', 'p3'),
+            {'role': 'assistant', 'content': 'listed it'},
+            user('an old client row', 's0-x-2', ''),
+            user('another old client row', 's0-x-2', ''),
+        ]
+        grouped = turns_of(history)
+        self.assertEqual(len(grouped), 5)
+        # Render the first four, so the window holds every one of them.
+        prompt, _ = build_surface_prompt([], user_message='what next?',
+                                         recent_turns=grouped[:SURFACE['recent_turns']])
+        conv = prompt[prompt.index('<conversation>'):prompt.index('</conversation>')]
+        turns = re.findall(r'<turn n="\d+">(.*?)</turn>', conv, re.S)
+        self.assertEqual(len(turns), 4)
+        self.assertEqual(turns[0].split(), [
+            '<user>look', 'into', 'the', 'grouping</user>',
+            '<user>also', 'the', 'Surface', 'window</user>',
+            '<shown', 'id="aaaa1111"/>', '<shown', 'id="bbbb2222"/>',
+            '<assistant>one', 'rule', 'now</assistant>'])
+        self.assertEqual([t.count('<user>') for t in turns[1:]], [1, 1, 1])
+
+        # The host names the turn across a Stop-hook continuation, but the
+        # Stop closed it: a message typed after the Stop opens its own turn.
+        continuation = [
+            user('run the migration', 's0-x-3', 'p4'),
+            {'role': 'assistant', 'content': 'migration done'},
+            user('and the backfill too', 's0-x-4', 'p4'),
+            {'role': 'assistant', 'content': 'backfill done'},
+        ]
+        prompt, _ = build_surface_prompt([], user_message='what next?',
+                                         recent_turns=turns_of(continuation))
+        conv = prompt[prompt.index('<conversation>'):prompt.index('</conversation>')]
+        turns = re.findall(r'<turn n="\d+">(.*?)</turn>', conv, re.S)
+        self.assertEqual([(t.count('<user>'), t.count('<assistant>')) for t in turns],
+                         [(1, 1), (1, 1)])
+
+    def test_a_turn_someone_else_opened_shows_its_opener_short(self):
+        """Another session's message, a subagent's report: the opener renders
+        under its speaker's element, cut at machine_message_limit; a status
+        note that rode in with the operator's prompt does not render."""
+        from servers.scales.s1.surface_contract import SURFACE, build_surface_prompt
+        report = 'R' * 900
+        history = [
+            {'ref_type': 'user_message', 'chain_id': 's0-x-0', 'content': 'audit it'},
+            {'ref_type': 'env_message', 'chain_id': 's0-x-0', 'content': 'Linked sessions now'},
+            {'role': 'assistant', 'content': 'delegated'},
+            {'ref_type': 'subagent_message', 'chain_id': 's0-x-1', 'content': report},
+            {'role': 'assistant', 'content': 'read the report'},
+        ]
+        prompt, _ = build_surface_prompt([], user_message='and?',
+                                         recent_turns=turns_of(history))
+        conv = prompt[prompt.index('<conversation>\n'):prompt.index('</conversation>')]
+        self.assertNotIn('Linked sessions now', conv)
+        self.assertIn('<subagent>%s</subagent>\n<assistant>read the report</assistant>'
+                      % ('R' * SURFACE['machine_message_limit']), conv)
+
+    def test_window_counts_the_operators_turns_and_carries_the_rest(self):
+        """The window holds the last SURFACE['recent_turns'] turns the
+        operator spoke in; the turns a notice or report opened between them
+        ride along free, so a run of them never pushes the operator's words
+        out, and no turn is cut."""
+        from servers.scales.s1.surface_contract import SURFACE, window_turns
+        rows = []
+        for i in range(SURFACE['recent_turns'] + 1):
+            rows += [{'role': 'user', 'content': 'operator %d' % i},
+                     {'role': 'assistant', 'content': 'reply %d' % i}]
+            rows += [{'ref_type': 'env_message', 'content': 'notice %d' % i},
+                     {'role': 'assistant', 'content': 'noted %d' % i}]
+        window = window_turns(turns_of(rows))
+        openers = [t['user']['content'] for t in window]
+        self.assertEqual(openers[0], 'operator 1')       # operator 0 fell out whole
+        self.assertEqual(sum(o.startswith('operator') for o in openers),
+                         SURFACE['recent_turns'])
+        self.assertEqual(sum(o.startswith('notice') for o in openers),
+                         SURFACE['recent_turns'])
+        self.assertTrue(all(t['assistant'] for t in window))
 
     def test_fetch_tool_names_in_sync(self):
         """SURFACE_FETCH_TOOLS must cover exactly the tools Haiku can fire —
@@ -479,7 +580,7 @@ class TestDecodeTransitions(BrainTestBase):
         # 5-tuple matches the real _call_surface contract (the trailing dict is
         # the run-cost telemetry the K trace now carries; this wiring test
         # doesn't assert on it).
-        def _fake_call_surface(brain, cands, user_message, recent_messages,
+        def _fake_call_surface(brain, cands, user_message, recent_turns,
                                sid, result, frame='', scope=None):
             return ({'selected': [
                 {'id': live['id'][:8], 'why': 'relevant'},
@@ -528,7 +629,7 @@ class TestDecodeTransitions(BrainTestBase):
         # Canned Haiku selection + KNOWN telemetry (the 5-tuple contract). The
         # read_usage→telemetry mapping inside _call_surface is covered by the
         # builder/guard unit tests; this asserts the threading into the K trace.
-        def _fake_call_surface(brain, cands, user_message, recent_messages,
+        def _fake_call_surface(brain, cands, user_message, recent_turns,
                                sid, result, frame='', scope=None):
             return ({'selected': [{'id': node['id'][:8], 'why': 'relevant'}]},
                     'prompt', 100, brain.get_interaction_stamp('surface'),
@@ -758,7 +859,7 @@ class TestSelectedIdRecovery(BrainTestBase):
 
         ctx = self.brain.get_or_create_session(session_id)
 
-        def _fake_call_surface(brain, cands, user_message, recent_messages,
+        def _fake_call_surface(brain, cands, user_message, recent_turns,
                                sid, result, frame='', scope=None):
             return ({'selected': selection}, 'prompt', 100, brain.get_interaction_stamp('surface'),
                     {'input_tokens': 50, 'output_tokens': 10,
@@ -964,7 +1065,7 @@ class TestShuffleTraceRecord(BrainTestBase):
 
         # Fake _call_surface that stashes the presentation record the way
         # the real one does (the stash, not the call, is under test here).
-        def _fake_call_surface(brain, cands, user_message, recent_messages,
+        def _fake_call_surface(brain, cands, user_message, recent_turns,
                                sid, result, frame='', scope=None):
             brain._surface_presented = {
                 sid: {'shuffle_seed': 12345,
@@ -1015,7 +1116,7 @@ class TestSelectionDeltaShape(BrainTestBase):
         selection = [{'id': node['id'][:8], 'why': 'r'}] if pick else []
 
         # The real stamp, so the builder sees the production-typed values.
-        def _fake_call_surface(brain, cands, user_message, recent_messages,
+        def _fake_call_surface(brain, cands, user_message, recent_turns,
                                sid, result, frame='', scope=None):
             return ({'selected': selection}, 'prompt', 100,
                     brain.get_interaction_stamp('surface'),

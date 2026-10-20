@@ -17,10 +17,10 @@ from urllib.parse import urlparse, parse_qs
 
 from . import db
 from . import log as dashboard_log
-from .daemon_client import DAEMON_PORT, daemon_alive, daemon_send
+from .daemon_client import DAEMON_PORT, daemon_alive, daemon_call, daemon_send
 from .queries import (
     aspects,
-    setup,
+    config,
     encoding,
     errors,
     explorer,
@@ -85,7 +85,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/setup":
             self._serve_static_file("setup.html")
         elif path == "/api/setup-state":
-            self._json(200, {"key_present": setup.api_key_present()})
+            self._json(200, {"key_present": config.api_key_present()})
+
+        # Configuration — which brain the daemon writes vs the one this
+        # dashboard reads, the gate (pause, ignored projects) with a verdict
+        # per live project, the key's presence. Polled on every tab for the
+        # pause banner.
+        elif path == "/api/config":
+            raw = params.get("projects", [""])[0]
+            self._json(200, config.query_config([p for p in raw.split(",") if p]))
 
         # Stats / health
         elif path == "/api/stats":
@@ -164,15 +172,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             session_id = params.get("session", [""])[0]
             self._json(200, traces.query_traces(hours=hours, scale=scale, session_id=session_id))
 
-        # One session's own operator conversation — the Streams tab shows a
-        # few lines of it as an identity cue, never as cross-stream traffic.
+        # One session's own operator conversation — the Sessions tab shows a
+        # few lines of it as an identity cue, never as cross-session traffic.
         elif path == "/api/session-messages":
             session_id = params.get("session", [""])[0]
             limit = int(params.get("limit", ["8"])[0])
             self._json(200, {"messages": traces.query_session_messages(
                 session_id=session_id, limit=limit)})
 
-        # Self-channel: stream↔stream messages + faithful boot captures
+        # Self-channel: session↔session messages + faithful boot captures
         elif path == "/api/self-messages":
             hours = int(params.get("hours", ["48"])[0])
             limit = int(params.get("limit", ["200"])[0])
@@ -191,11 +199,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/self-presence":
             # Live roster — must go through the daemon (window + ranking logic).
-            # Omit session_id so the operator sees every live stream. Returns
-            # {streams:[], line:''} or an empty roster when the daemon is down.
+            # Omit session_id so the operator sees every live session. Returns
+            # {sessions:[], line:''} or an empty roster when the daemon is down.
             limit = int(params.get("limit", ["10"])[0])
             result = daemon_send("self_presence", {"limit": limit})
-            self._json(200, result if isinstance(result, dict) else {"streams": [], "line": ""})
+            self._json(200, result if isinstance(result, dict) else {"sessions": [], "line": ""})
 
         # Explorer + graph
         elif path == "/api/nodes":
@@ -219,15 +227,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
 
     def do_POST(self):
-        """The dashboard's POST surfaces. The DB invariant holds for all three
-        (CLAUDE.md: passive observer, never writes the DBs):
+        """The dashboard's POST surfaces. The DB invariant holds for all four
+        (CLAUDE.md: passive observer, never writes the DBs), and so does the
+        file invariant: the dashboard writes no file either — every write is
+        a daemon command over TCP, same as any MCP client.
 
-        * /api/self-send   → hands off to the daemon (the single writer) over
-                             TCP, same as any MCP client. No write connection.
-        * /api/setup-key   → writes ONE user-config file
-                             (~/.config/brain/env, mode 600) — the no-terminal
-                             onboarding path for the API key. Localhost-only
-                             (server binds 127.0.0.1). Never touches a DB.
+        * /api/self-send   → the daemon's self_send (the single writer).
+        * /api/setup-key   → the daemon's set_api_key: the no-terminal
+                             onboarding path for the API key, which the
+                             daemon validates and writes to the user config
+                             file (~/.config/brain/env, mode 600).
+        * /api/gate        → the daemon's gate command, pause / resume only
+                             (ignore patterns are edited with the MCP tool).
         * /api/recall      → runs the REAL recall pipeline through the daemon
                              with mark_accessed=False. POST because it carries
                              a query body, not because it writes: the flag makes
@@ -244,23 +255,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_self_send()
         elif path == "/api/setup-key":
             self._handle_setup_key()
+        elif path == "/api/gate":
+            self._handle_gate()
         elif path == "/api/recall":
             self._handle_recall()
         else:
             self._json(404, {"error": "Not found"})
 
     def _handle_setup_key(self):
-        """Accept {"api_key": "sk-..."} and persist it to the brain env file.
+        """Accept {"api_key": "sk-..."} and hand it to the daemon, which
+        validates it and writes the brain env file (dispatch_ops.set_api_key).
 
-        The key value is treated as a secret end-to-end: validated, written
-        0600, never logged, never echoed back in the response.
+        The key value is treated as a secret end-to-end: never logged, never
+        echoed back in the response — by this server or by the daemon.
         """
         body, err = self._read_json_body()
         if err:
             return self._json(400, {"ok": False, "error": err})
-        key = (body.get("api_key") or "").strip()
-        ok, msg = setup.write_api_key(setup.brain_env_path(), key)
+        ok, msg = config.set_api_key((body.get("api_key") or "").strip())
         self._json(200 if ok else 400, {"ok": ok, "message": msg})
+
+    def _handle_gate(self):
+        """Accept {"action": "pause"|"resume"} and flip the brain's run switch
+        through the daemon's gate command. Only the two pause actions are
+        accepted from a page: the ignore list is shown here and edited with
+        the `gate` MCP tool, so a stray POST cannot rewrite it."""
+        body, err = self._read_json_body()
+        if err:
+            return self._json(400, {"ok": False, "error": "bad request body: %s" % err})
+        action = (body.get("action") or "").strip()
+        if action not in ("pause", "resume"):
+            return self._json(400, {"ok": False, "error": "'action' must be pause or resume"})
+        resp = config.set_paused(action == "pause")
+        if not resp.get("ok"):
+            return self._json(502, {"ok": False, "error": resp.get("error") or "daemon returned no result"})
+        self._json(200, {"ok": True, "result": resp.get("result")})
 
     # Largest legitimate POST body (self-send message / setup key) is well
     # under this. Caps the read so a hostile Content-Length can't tie up a
@@ -393,7 +422,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _handle_self_send(self):
         """Operator-authored send into the self-channel courier → daemon's
-        self_send. The operator is not a stream of thought, so from_session
+        self_send. The operator is not a session, so from_session
         carries a recognizable label ('operator-dashboard') rather than a
         session id — it renders attributed, never masquerading as another-me."""
         body, err = self._read_json_body()
@@ -410,10 +439,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "body": message,
             "from_session": body.get("from_session") or "operator-dashboard",
         }
-        result = daemon_send("self_send", args)
-        if result is None:
-            return self._json(502, {"ok": False, "error": "daemon returned no result"})
-        self._json(200, {"ok": True, "result": result})
+        resp = daemon_call("self_send", args)
+        if not resp.get("ok"):
+            # The daemon's refusal (an over-limit body, an unknown target) is
+            # the operator's answer — pass its text through.
+            return self._json(502, {"ok": False, "error": resp.get("error")
+                                    or "daemon returned no result"})
+        self._json(200, {"ok": True, "result": resp.get("result")})
 
     # ── Response helpers ──
 

@@ -100,7 +100,9 @@ def test_ping_reports_the_scribe_cadence():
 ])
 def test_encode_chip_reads_the_daemon_cadence(tmp_path, monkeypatch, ping, every, daemon):
     monkeypatch.setenv("BRAIN_DB_DIR", str(tmp_path))
-    monkeypatch.setattr(stats, 'daemon_send', lambda cmd, timeout=3: ping)
+    # The chip reads the daemon's cadence through system.daemon_record, the
+    # dashboard's one ping→view mapping.
+    monkeypatch.setattr('dashboard.queries.system.daemon_send', lambda cmd, timeout=3: ping)
     d = stats.query_stats()
     assert d['daemon'] == daemon
     assert d['encoding'] == {'turns_since': 0, 'every': every, 'due': False}

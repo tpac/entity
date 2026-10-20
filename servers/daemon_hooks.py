@@ -10,46 +10,20 @@ Each function signature: hook_*(brain, args, graph_changes) -> dict
   - graph_changes: list[str] — in-memory mutation log, drained by hook_recall
 
 Returns: {"output": str} for text hooks, or {"output": str, "json": dict}
-for hooks that need structured JSON output (recall, pre-edit, pre-bash).
+for hooks that need structured JSON output (recall, pre-edit).
 """
 
-import json
-import os
 import time
 
 from servers.brain_traces import _s0_trace
 from servers.brain_voice import BrainVoice
-from servers.contract import TITLE_WARN_LIMIT
-from servers.loud_truncation import cap_text_loud
 # Hoisted — if this import ever breaks, the daemon fails at boot instead of
 # silently degrading recall 16s in.
 from servers.embedder import embed_query
-from servers.daemon_config import brain_tmp_dir
-from servers.trace_contract import REGISTER_ONLY_FIELD
-
-
-DESTRUCTIVE_REGEXES = [
-    r"rm\s+(-[rf]+\s+|.*--force)",
-    r"git\s+worktree\s+remove",
-    r"git\s+reset\s+--hard",
-    r"git\s+clean\s+-[fd]",
-    r"git\s+checkout\s+--\s",
-    r"git\s+push\s+.*--force",
-    r"DROP\s+TABLE",
-    r"DELETE\s+FROM",
-    r"TRUNCATE",
-    r"\brmdir\b",
-    r"xargs\s+rm",
-]
-
-ENV_CHANGE_PATTERNS = [
-    r"\bpip\b.*\binstall\b", r"\bpip\b.*\buninstall\b",
-    r"\bbrew\b.*\binstall\b", r"\bbrew\b.*\buninstall\b",
-    r"\bapt\b.*\binstall\b", r"\bnpm\b.*\binstall\b",
-    r"\bcargo\b.*\binstall\b", r"\bgem\b.*\binstall\b",
-    r"\bpyenv\b", r"\bnvm\b.*\buse\b", r"\bnvm\b.*\binstall\b",
-    r"\bconda\b.*\binstall\b", r"\bconda\b.*\bactivate\b",
-]
+from servers.host_contract import envelope_policy
+from servers.trace_contract import (ENVELOPE_EXTRACT_PREFIX, HOST_TURN_FIELD,
+                                    READER_STAMP_FIELDS, REGISTER_ONLY_FIELD,
+                                    SPEAKER_REF_TYPES, session_short)
 
 
 # ── Helpers ──
@@ -149,7 +123,143 @@ class PhaseTimer:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _prompt_delivery(brain, ctx):
+    """The Thalamus block for this session's first operator prompt, '' after
+    that or when nothing is due. The flag is set FIRST: a raise inside the
+    leg must not re-fire the moment on every later prompt."""
+    if ctx.prompt_delivered:
+        return ''
+    ctx.prompt_delivered = True
+    try:
+        from .channels.delivery import deliver, PROMPT
+        return deliver(brain, ctx, PROMPT)[0]
+    except Exception as e:
+        brain._log_error('prompt_delivery', e,
+                         'first-prompt delivery raised (session=%s)' % ctx.session_id)
+        return ''
+
+
+def _reader_stamp(args):
+    """The contract identity a hook sent beside what its reader decided
+    (trace_contract.READER_STAMP_FIELDS); {} from a client that predates it."""
+    return {k: args[k] for k in READER_STAMP_FIELDS if args.get(k) is not None}
+
+
+def _pieces(args):
+    """The prompt hook's reading of the prompt (host_contract.read_prompt):
+    the (speaker, text, tag) pieces, or None from a client that predates the
+    reader or sent pieces the write door cannot place — those record the
+    whole prompt as one operator row, as before."""
+    pieces = args.get("pieces")
+    if pieces is None:
+        return None
+    if pieces and all(isinstance(p, (list, tuple)) and len(p) == 3
+                      and p[0] in SPEAKER_REF_TYPES
+                      and isinstance(p[1], str) and isinstance(p[2], str)
+                      for p in pieces):
+        return pieces
+    return None
+
+
+def _operator_spoke(args):
+    """True when the operator's own text was recalled on this prompt — the
+    first-prompt moment's condition. A harness notice or a subagent's report
+    is not the operator arriving."""
+    if args.get("register_only"):
+        return False
+    pieces = _pieces(args)
+    return pieces is None or pieces[0][0] == 'operator'
+
+
+def _write_incoming(brain, ctx, args, host):
+    """Write the prompt's incoming S0 rows — one per piece the prompt hook
+    read (host_contract.read_prompt), each as its speaker's ref_type, the
+    piece that opens the turn first so the pieces cut from the prompt ride in
+    that turn. Each row carries the contract identity that read it. The first
+    row is the turn's: it holds the recall chain and, when nothing is
+    recalled, the register-only mark. A client that predates the reader (or
+    sent pieces this door cannot place, logged) records the whole prompt as
+    one operator row, as before. The reader declares and this door checks:
+    a piece whose tag the contract does not declare, and an extract envelope
+    that read nothing, are each logged as a warning — against `host`, the
+    host this prompt's own tells resolved, the table the hook read. Every row
+    carries the host's name for the turn when the hook read one
+    (host_contract.read_turn) — the turn rule joins a message absorbed
+    mid-turn to its turn by it. Returns
+    (first row's trace id, the text recall reads)."""
+    prompt = args.get("prompt", "")
+    pieces = _pieces(args)
+    if pieces is None and args.get("pieces") is not None:
+        brain._log_error('hook_recall_pieces', None,
+                         'prompt hook sent pieces the write door cannot place '
+                         '— recorded the whole prompt as one operator row '
+                         '(session=%s)' % ctx.session_id, ctx)
+    stamp = {}
+    if pieces is None:
+        pieces = [['operator', prompt, '']]
+    else:
+        stamp = _reader_stamp(args)
+    turn = args.get(HOST_TURN_FIELD)
+    if isinstance(turn, str) and turn:
+        stamp[HOST_TURN_FIELD] = turn
+    elif turn not in (None, ''):
+        brain._log_warning(
+            'host_turn_malformed', 'the prompt hook sent a host turn that is '
+            'not a string — this prompt\'s rows carry none, so a message '
+            'absorbed mid-turn opens a turn of its own',
+            'session=%s value=%.80r' % (ctx.session_id, turn), ctx)
+    first = None
+    for speaker, text, tag in pieces:
+        meta = dict(stamp)
+        if first is None:
+            meta['recall_chain'] = ctx.s1r_chain()
+            if args.get("register_only"):
+                meta[REGISTER_ONLY_FIELD] = True   # no recall/surface below
+        trace_id = _s0_trace(
+            brain, ctx, event_type='K', ref_type=SPEAKER_REF_TYPES[speaker],
+            summary=text[:200], metadata=meta, content=text or None, ref_id=tag)
+        first = first or trace_id
+        if tag and envelope_policy(host, tag) is None:
+            brain._log_warning(
+                'unknown_envelope', 'a prompt arrived wrapped in %s, which no '
+                'envelope declares — recorded as the harness\'s, without recall; '
+                'declare it in host_contract' % tag,
+                'session=%s host=%s' % (ctx.session_id, host or 'unknown'), ctx)
+    policy = (envelope_policy(host, pieces[0][2]) or ('', ''))[1]
+    if policy.startswith(ENVELOPE_EXTRACT_PREFIX) and not args.get("recall_text"):
+        # An error, not a warning: a declared envelope the parser could not
+        # read is the host's format moving under the contract — surfaced at boot.
+        brain._log_error(
+            'hook_recall_extract', None, 'a %s envelope matched but its extractor '
+            'read nothing — recorded the raw envelope without recall (session=%s)'
+            % (pieces[0][2], ctx.session_id), ctx)
+    return first, args.get("recall_text") or prompt
+
+
 def hook_recall(brain, args, graph_changes):
+    """UserPromptSubmit: the recall turn (_recall_turn), then — once per
+    session, on its first operator prompt — the Thalamus PROMPT delivery
+    (ruling id:15e46fa9) composed ahead of whatever the turn surfaced. ONE
+    composition site, so no early return inside the turn can drop a
+    session's due items. A prompt the operator did not speak in (a short
+    answer, a harness notice, a subagent's report) never reaches the moment:
+    boot cannot tell an operator from a scheduler, the first prompt can. The
+    Thalamus rides this passive moment because it survives a miss; the
+    courier does not — self-message delivery stays on Stop alone (a block the
+    host cannot skip; on_prompt additionalContext would lose the consume-once
+    race and once overflowed the inject spill cap —
+    docs/SELF-CHANNEL-DESIGN.md)."""
+    result = _recall_turn(brain, args, graph_changes)
+    if not _operator_spoke(args):
+        return result
+    block = _prompt_delivery(brain, brain.get_or_create_session(args.get('session_id', '')))
+    if block:
+        prior = (result.get("json") or {}).get("additionalContext", "")
+        result["json"] = {"additionalContext": block + ('\n\n' + prior if prior else '')}
+    return result
+
+
+def _recall_turn(brain, args, graph_changes):
     """Pre-response recall — surfaces brain context before Claude responds.
 
     Fires on UserPromptSubmit. Returns JSON with additionalContext.
@@ -173,48 +283,33 @@ def hook_recall(brain, args, graph_changes):
     """
     pt = PhaseTimer(
         enabled=bool(brain.get_config('phase_timing.enabled', True)))
-    user_message = args.get("prompt", "")
     ctx = brain.get_or_create_session(args.get('session_id', ''))
     session_id = ctx.session_id
     _current_stop = str(ctx.stop_counter)
     # Mark that a real UserPromptSubmit ran recall for THIS stop. The Stop hook
     # reads this to classify the turn: recall ran → conversational. A /watch
-    # wakeup skips recall client-side (pre_response_recall.py: slash/bang/short),
-    # so its stop never reaches here → it reads as a heartbeat. The client has
+    # wakeup skips recall client-side (pre_response_recall.py: a repeating
+    # command or a shell escape has no pieces), so its stop never reaches
+    # here → it reads as a heartbeat. The client has
     # already filtered, so reaching hook_recall means a real prompt.
     # See trace_contract S0 TURN CLASSIFICATION.
     ctx.last_recall_stop = ctx.stop_counter
-    _set_hook_env(ctx, args.get('model', ''), args.get('tells'))
+    host = _set_hook_env(ctx, args.get('model', ''), args.get('tells'))
 
-    # Write the user_message S0 trace NOW, at prompt-arrival — not at Stop. This
-    # is what lets presence/peek surface a stream's current prompt mid-turn
+    # Write the incoming S0 rows NOW, at prompt-arrival — not at Stop. This
+    # is what lets presence/peek surface a session's current prompt mid-turn
     # (rendezvous identity), instead of only its last completed turn. The
     # assistant half is still written at Stop (post_response_common); both use
     # ctx.s0_chain() with the same stop_counter, so they stay paired. Reaching
     # hook_recall means a real prompt (client filters watch-wakes), so this is
     # exactly the conversational set — heartbeat turns never get here.
-    _user_meta = None
-    if user_message:
-        _user_meta = {'recall_chain': ctx.s1r_chain()}
-        if args.get("register_only"):
-            _user_meta[REGISTER_ONLY_FIELD] = True   # no recall/surface below
-    _user_msg_trace_id = _s0_trace(
-        brain, ctx, event_type='K', ref_type='user_message',
-        summary=user_message[:200] if user_message else '',
-        metadata=_user_meta,
-        content=user_message or None)
-
-    # Write current stop counter to tmp file — PostToolUse reads this (cross-process)
-    try:
-        with open(os.path.join(brain_tmp_dir(), 'brain-%s-current-stop.txt' % session_id), 'w') as _f:
-            _f.write(_current_stop)
-    except Exception as e:
-        brain._log_error('write_current_stop', e, 'hook_recall')
+    _user_msg_trace_id, recall_text = _write_incoming(brain, ctx, args, host)
 
     # ── Register-only fast path ──
-    # Short answers ("yes", "ok", "no") that the client routes here with
-    # register_only=True. The turn IS conversational and is now fully registered:
-    # the user_message S0 trace + last_recall_stop are written ABOVE, and the
+    # A prompt with nothing to recall on — a short answer ("yes", "ok", "no"),
+    # a harness notice — that the client routes here with register_only=True.
+    # The turn IS conversational and is now fully registered: its S0 rows +
+    # last_recall_stop are written ABOVE, and the
     # daemon reset last_user_activity (the clock is gated on cmd=='hook_recall',
     # which this still is). We skip ONLY the expensive recall + Haiku surface,
     # which carry no signal on a 3-char reply. WITHOUT this branch the client
@@ -228,7 +323,7 @@ def hook_recall(brain, args, graph_changes):
         return {"json": {"decision": "approve"}, "session_id": session_id}
 
     from .pipeline_contract import PIPELINE as _PL
-    enriched = user_message[:_PL['user_message_query']]
+    enriched = recall_text[:_PL['user_message_query']]
     pt.mark('setup')
 
     # Recall — logging happens inside brain.recall() (single source of truth)
@@ -240,65 +335,53 @@ def hook_recall(brain, args, graph_changes):
         # Over-fetch by seen_dedup_headroom: the seen-dedup filter below
         # drops already-surfaced nodes, and without headroom recall's own
         # truncation leaves nothing to backfill with — the pool would only
-        # shrink (a98143f review, finding 1).
+        # shrink (a98143f review, finding 1). The cue is this prompt's first
+        # row: the LAF moment stack's window ends just before it, as the
+        # Surface's window below does.
         result = brain.recall(query=enriched,
                               limit=_CF['max_candidates']
                               + _CF.get('seen_dedup_headroom', 0),
-                              ctx=ctx, source='hook')
+                              ctx=ctx, source='hook',
+                              cue_trace_id=_user_msg_trace_id)
     except Exception as e:
         brain._log_error('recall_first_attempt', e, 'hook_recall')
         result = brain.recall(query=enriched,
                               limit=_CF['max_candidates']
                               + _CF.get('seen_dedup_headroom', 0),
-                              ctx=ctx, source='hook')
+                              ctx=ctx, source='hook',
+                              cue_trace_id=_user_msg_trace_id)
 
     results = result.get("results", [])
     pt.mark('recall')
 
-    recall_ref = '%s-%s' % (session_id[:8], _current_stop)
+    recall_ref = '%s-%s' % (ctx.session_short, _current_stop)
 
     # Enrich candidates for the surface call: batch rich-node pull, then
     # query-aware edge selection.
     candidates_data = []
-    recent_messages = []
+    recent_turns = []
     _query_vec = None
     _prior_vecs = []
     try:
         capped = results[:_CF['max_candidates']]
 
-        # Previous turns — ONE pull serves both consumers below (the surface
-        # conversation window and the prior-query embedding blend), keeping
-        # their notion of "previous" aligned by construction. Exclude the
-        # current prompt's own trace row: it was written at prompt-arrival
-        # (above) and the current message reaches build_surface_prompt
-        # separately as `user_message`, rendered as its own block. Keyed on
-        # the trace id, not the chain — after an interrupt the current chain
-        # also holds the previous real prompt, which belongs in the window.
-        # Drop wake envelopes — task-notification ignites are
-        # recorded as user_message traces but are machine payloads, not
-        # operator speech; Haiku must not read them as conversation.
-        # Limit comes from SURFACE['recent_messages'] so the upstream pull and
-        # the downstream slice in build_surface_prompt share one source of truth.
-        from .scales.s1.surface_contract import SURFACE as _SURFACE
-        from .trace_contract import WAKE_ENVELOPE_MARKER
-        turns = []
+        # Previous turns — ONE read serves the surface conversation window,
+        # the seen-dedup set and the prior-query embedding blend below,
+        # keeping their notion of "previous" aligned by construction: whole
+        # turns (brain.conversation_turns, the reader the encoder shares),
+        # windowed by surface_contract.window_turns. The read ends before this
+        # prompt's first row (before_trace_id) — written at prompt-arrival
+        # above, while the current message reaches build_surface_prompt
+        # separately as `user_message` — so the prompt's own pieces never
+        # form a turn, and a message absorbed mid-turn still sees the turn it
+        # joined.
+        from .scales.s1.surface_contract import SURFACE as _SURFACE, window_turns
         try:
-            # Over-fetch so filtered wake envelopes don't cost window slots,
-            # then trim back to the configured window after filtering.
-            turns = brain.get_conversation(
-                session_id, limit=_SURFACE['recent_messages'] + 4,
-                with_judge_output=False, with_surfaced=True,
-                exclude_trace_id=_user_msg_trace_id)
-            turns = [t for t in turns
-                     if not (t.get('content') or '').startswith(WAKE_ENVELOPE_MARKER)]
-            turns = turns[-_SURFACE['recent_messages']:]
-            recent_messages = [
-                {"role": t['role'],
-                 "content": (t['content'] or '')[:_PL['recent_message_content']],
-                 "surfaced": t.get('surfaced') or []}
-                for t in turns]
+            recent_turns = window_turns(brain.conversation_turns(
+                session_id, _SURFACE['window_read_turns'], with_surfaced=True,
+                before_trace_id=_user_msg_trace_id))
         except Exception as _e:
-            brain._log_error('surface_recent_messages', _e, 'fetching recent messages from traces')
+            brain._log_error('surface_recent_turns', _e, 'reading the previous turns from traces')
         pt.mark('traces')
 
         # Already-shown dedup, BEFORE the final cap — replacements backfill
@@ -310,14 +393,18 @@ def hook_recall(brain, args, graph_changes):
         # <candidates>. The v13 <shown> prompt rule alone doesn't hold —
         # Haiku re-picked shown nodes with the element in-prompt (2026-07-27
         # capture) — so out-of-scope is now structural, in code. The seen
-        # set reuses the turns pulled above (no extra query). The same set
+        # set reuses the turns read above (no extra query). The same set
         # gates Haiku's tool results and the final selection in run_surface:
-        # a node the stream already has in context this window does not
-        # render again through any door (the stream can get_nodes it). Falls
-        # back to the plain cap when the turns pull failed (recent_messages
+        # a node the agent already has in context this window does not
+        # render again through any door (the agent can get_nodes it). Falls
+        # back to the plain cap when the turns read failed (recent_turns
         # empty → seen empty).
+        # Seen is read over every incoming row of the window's turns, not
+        # only the operator's: a subagent's report runs recall too, and what
+        # it surfaced is in context just the same. A node re-enters once its
+        # turn slides out of what Haiku sees.
         from .scales.s1.surface import seen_node_ids
-        _seen = seen_node_ids(recent_messages)
+        _seen = seen_node_ids(recent_turns)
         if _seen:
             kept = [r for r in results
                     if str(r.get('id') or '')[:8] not in _seen]
@@ -342,12 +429,15 @@ def hook_recall(brain, args, graph_changes):
         _query_emb = result.get("_query_embedding")
         if _query_emb is not None:
             _query_vec = np.frombuffer(_query_emb, dtype=np.float32) if isinstance(_query_emb, bytes) else np.array(_query_emb, dtype=np.float32)
-            # Prior user messages for the multi-turn blend — sliced from the
-            # single turns pull above (last 4 messages, first 2 user turns).
+            # The operator's last two messages for the multi-turn blend —
+            # from the single turns read above, wherever in the window they
+            # sit (turns others opened carry none).
             try:
-                _user_turns = [t for t in turns[-4:] if t.get('role') == 'user'][:2]
-                for _t in _user_turns:
-                    _text = (_t.get('content') or '')[:500]
+                from .trace_contract import row_speaker, row_text, turn_incoming
+                _prior = [r for t in recent_turns for r in turn_incoming(t)
+                          if row_speaker(r) == 'operator'][-2:]
+                for _t in _prior:
+                    _text = row_text(_t)[:500]
                     if _text and len(_text) > 5:
                         _blob = embed_query(_text)
                         if _blob:
@@ -444,8 +534,8 @@ def hook_recall(brain, args, graph_changes):
             # actually saw (post seen-dedup, post cap), not recall's raw
             # over-fetched list (a98143f review, finding 3).
             additional_context = _run_surface(
-                brain, ctx, candidates_data, user_message,
-                recent_messages=recent_messages,
+                brain, ctx, candidates_data, recall_text,
+                recent_turns=recent_turns,
                 result=result, enriched=enriched, results=capped,
                 recall_ref=recall_ref, session_id=session_id,
                 graph_changes=graph_changes,
@@ -475,20 +565,13 @@ def hook_recall(brain, args, graph_changes):
                     "[/BRAIN]" % BrainVoice.llm_paused_notice(brain))
     except Exception as _surface_err:
         brain._log_error('daemon_surface', _surface_err,
-                         'S1 Surface failed in daemon (query=%s)' % user_message[:100])
+                         'S1 Surface failed in daemon (query=%s)' % recall_text[:100])
 
     pt.log(brain, 'hook_recall', n_results=len(results))
 
-    # NOTE: self-message delivery deliberately does NOT happen here. on_prompt
-    # (additionalContext) is the weakest channel — it competes with recall/Frame
-    # and would lose the consume-once race against higher-salience hooks. A
-    # block prepended here also overflowed the inject spill cap, losing context.
-    # Delivery lives on Stop alone (block — don't end with an unread tap), via
-    # signal.drain_and_render. See docs/SELF-CHANNEL-DESIGN.md.
     if additional_context:
         return {"json": {"additionalContext": additional_context}, "session_id": session_id}
-    else:
-        return {"json": {"decision": "approve"}, "session_id": session_id}
+    return {"json": {"decision": "approve"}, "session_id": session_id}
 
 
 
@@ -500,6 +583,8 @@ def _set_hook_env(ctx, model, tells):
 
     An old client's pre-resolved host is no longer an input. Unknown and
     ambiguous observations leave the session's last known host alone.
+    Returns the host this observation resolved — '' when unknown or
+    ambiguous, as the prompt hook's own resolution reads it.
     """
     from .host_contract import resolve_host
     present = {t: True for t in tells if isinstance(t, str)} \
@@ -508,13 +593,18 @@ def _set_hook_env(ctx, model, tells):
     ctx.set_env(model=model)
     if status in ('strong', 'family'):
         ctx.set_env(host=host)
+    return host
 
 
 def post_response_common(brain, session_id, assistant_response, *,
-                         model='', tells=None):
+                         model='', tells=None, stamp=None):
     """Shared post-response path: S0 traces, heartbeat, stop counter
     increment. Used by prod Stop hook and by the eval harness —
     same code, same ordering, one source of truth.
+
+    `assistant_response`: the reply the Stop hook's contract reader decided
+    (host_contract.read_reply); `stamp` the reader's identity
+    (_reader_stamp), carried on the assistant_message row.
 
     `model` / `tells`: raw Stop observations. The daemon resolves the host;
     only strong/family resolution updates the session's latest identity.
@@ -561,7 +651,7 @@ def post_response_common(brain, session_id, assistant_response, *,
         if is_conversational or is_delivery_reaction:
             # For an operator turn: user_message was written at
             # UserPromptSubmit (hook_recall), when the prompt ARRIVED — so
-            # presence/peek can surface a stream's current prompt mid-turn.
+            # presence/peek can surface a session's current prompt mid-turn.
             # Only the assistant half is written here, at Stop; stop_counter
             # is unchanged between hook_recall and this Stop (incremented
             # below), so the pair shares the chain. For a delivery REACTION:
@@ -571,7 +661,7 @@ def post_response_common(brain, session_id, assistant_response, *,
             # other side.
             _s0_trace(
                 brain, ctx, event_type='delta', ref_type='assistant_message',
-                summary=assistant_response[:200],
+                summary=assistant_response[:200], metadata=stamp or None,
                 content=assistant_response or None)
         else:
             # Heartbeat: wakeup re-arm, no real prompt. One observability marker
@@ -628,14 +718,14 @@ def hook_post_response_track(brain, args, graph_changes):
     # reads it). A gap here means the S0 record goes down without a model, and
     # a boot-time check would fire once and be easy to bypass — this fires at
     # the write, per session (the error text carries the session, so the
-    # dedup fingerprint is per stream: one row per session per dedup window,
-    # and a second stream's gap is never masked by the first's). Logged, never
+    # dedup fingerprint is per session: one row per session per dedup window,
+    # and a second session's gap is never masked by the first's). Logged, never
     # blocking: the turn is still recorded.
     if args.get("hook_event_name") == "Stop" and not args.get("model"):
-        _sid_short = (args.get('session_id', '') or '')[:8]
         brain._log_error(
             's0_model_unset',
-            ValueError('no model on Stop for session %s' % _sid_short),
+            ValueError('no model on Stop for session %s'
+                       % session_short(args.get('session_id', ''))),
             'the turn\'s S0 rows carry no model stamp')
     ctx = post_response_common(
         brain,
@@ -643,14 +733,16 @@ def hook_post_response_track(brain, args, graph_changes):
         args.get("last_assistant_message", "") or "",
         model=args.get("model", "") or "",
         tells=args.get("tells"),
+        stamp=_reader_stamp(args),
     )
     session_id = ctx.session_id
 
     # Delivery — the Stop moment, the forcing leg: a `decision:block` reason
     # compels a read, where a passive mid-thread additionalContext competes
     # with recall and can be missed. channels/delivery.py owns the leg:
-    # eligible sources (courier drain + Thalamus pull — asks excluded at
-    # Stop, they deliver at boot), each failure-isolated and traced. Blocks
+    # eligible sources (courier drain + Thalamus pull — broadcast asks
+    # excluded at Stop, they deliver at the first prompt; directed asks
+    # deliver here), each failure-isolated and traced. Blocks
     # at most once per batch per source (the next Stop finds nothing and
     # allows it). Gated on the Stop event: hooks.json wires this handler to
     # Stop, and the guard keeps any future second wiring from blocking where
@@ -691,103 +783,63 @@ def hook_post_response_track(brain, args, graph_changes):
 
 
 def hook_pre_edit(brain, args, graph_changes):
-    """PreToolUse(Edit|Write) — surface brain rules before file edits.
-    (Self-message delivery lives on Stop alone — hook_post_response_track.)
+    """PreToolUse(Edit|Write) — the tool moment: memories about a file at its
+    agent's first edit of it, the attention moment beside the prompt.
 
-    Returns JSON {"decision":"approve","reason":"..."}.
+    One recall on the cue "editing <path>": nothing promoted, at most
+    TOOL_MOMENT_MAX_NODES, never a node the agent has already been shown.
+    An agent recalls a cue once per session — the moment's own `tool_shown`
+    rows (brain.tool_moment_rows) say which cues ran and what they showed;
+    every run writes one, shown or not. The session's agent skips what the
+    prompt surface showed in its window and what the moment itself showed this
+    session. The moment's shows are not Haiku's picks: the prompt surface may
+    still pick them. A subagent (`agent_id`) skips only its own shows — it never
+    saw the session agent's context. A path TOOL_MOMENT_SKIP matches recalls
+    nothing and writes no row.
+
+    Returns {"json": {"additionalContext": text}}, or {"json": {}} when there
+    is nothing to say.
     """
-    filename = args.get("filename", "")
-    tool_name = args.get("tool_name") or ""
-
-    if not filename:
-        return {"json": {"decision": "approve"}}
-
+    from .scales.s1.surface_contract import (
+        CANDIDATE_POOL, SURFACE, TOOL_MOMENT_MAX_NODES, TOOL_MOMENT_SKIP,
+        render_tool_inject, window_turns)
+    path = args.get("path", "")
     sid = args.get("session_id", "")
-    ctx = brain.get_or_create_session(sid) if sid else None
+    agent_id = args.get("agent_id") or ""
+    if not path or not sid or TOOL_MOMENT_SKIP.search(path):
+        return {"json": {}}
+    from .scales.s1.surface import seen_node_ids
+    cue = "editing %s" % path
     try:
-        data = brain.pre_edit(file=filename, tool_name=tool_name, ctx=ctx)
+        ctx = brain.get_or_create_session(sid)
+        rows = brain.tool_moment_rows(sid, agent_id)
+        if any(r['cue'] == cue for r in rows):
+            return {"json": {}}
+        seen = {str(i)[:8] for r in rows for i in r['ids']}
+        if not agent_id:
+            seen |= seen_node_ids(window_turns(brain.conversation_turns(
+                sid, SURFACE['window_read_turns'], with_surfaced=True)))
+        # Over-fetch by the surface's seen-dedup headroom, so dropping
+        # already-shown nodes leaves replacements to fill the cap.
+        result = brain.recall(
+            query=cue, ctx=ctx, source='tool_moment',
+            limit=TOOL_MOMENT_MAX_NODES + CANDIDATE_POOL['seen_dedup_headroom'])
+        ids = [r['id'] for r in result.get('results', [])
+               if r.get('id') and r['id'][:8] not in seen
+               ][:TOOL_MOMENT_MAX_NODES]
+        fetched = (brain.get_node(ids) or {}) if ids else {}
+        # The pull resolves an archived id to its survivor, which can be a
+        # node the agent was already shown, or the same node twice.
+        nodes = list({n['id']: n for n in (fetched.get(i) for i in ids)
+                      if n and n['id'][:8] not in seen}.values())
+        text = render_tool_inject(nodes, path, scope=brain.session_scope(sid))
     except Exception as e:
-        brain._log_error('pre_edit', e, 'hook_pre_edit')
-        return {"json": {"decision": "approve"}}
-
-    suggestions = data.get("suggestions", [])
-    procedures = data.get("procedures", [])
-    context_files = data.get("context_files", [])
-    debug_enabled = data.get("debug_enabled", False)
-
-    # Change impact maps
-    change_impacts = []
-    try:
-        change_impacts = brain.get_change_impact(filename)
-    except Exception as e:
-        brain._log_error('get_change_impact', e, 'hook_pre_edit')
-
-    if not suggestions and not procedures and not context_files and not change_impacts:
-        return {"json": {"decision": "approve"}}
-
-    context = BrainVoice.format_suggestions(filename, suggestions, procedures,
-                                            context_files, change_impacts)
-
-    # Debug logging
-    if debug_enabled:
-        try:
-            node_ids = [s.get("id", "") for s in suggestions if s.get("type") != "procedure"]
-            node_ids += [p.get("id", "") for p in procedures]
-            brain.log_debug(
-                event_type="pre_edit",
-                source="hook",
-                file_target=filename,
-                suggestions_served=len([s for s in suggestions if s.get("type") != "procedure"]),
-                procedures_served=len(procedures),
-                node_ids_served=json.dumps(node_ids),
-                metadata=json.dumps({"tool": tool_name}),
-            )
-        except Exception as e:
-            brain._log_error('debug_log_pre_edit', e, 'hook_pre_edit')
-
-    brain.save()
-    return {"json": {"decision": "approve", "reason": context}}
-
-
-def hook_pre_bash_safety(brain, args, graph_changes):
-    """PreToolUse(Bash) — safety context for destructive commands.
-
-    Returns JSON {"decision":"approve","reason":"..."} — the brain informs the
-    model about matching warnings; it never blocks the command (the host's own
-    permission rules decide).
-    """
-    command = args.get("command", "")
-
-    try:
-        result = brain.safety_check(command)
-    except Exception as e:
-        brain._log_error('safety_check', e, 'hook_pre_bash_safety')
-        return {"json": {
-            "decision": "approve",
-            "reason": "[BRAIN] \u26a0\ufe0f Safety check failed — proceed carefully. [/BRAIN]",
-        }}
-
-    warnings = result.get("warnings", [])
-
-    if warnings:
-        lines = ["[BRAIN] \u26a0\ufe0f WARNING: Destructive command detected. Relevant brain context:"]
-        lines.append("")
-        for w in warnings[:5]:
-            title = cap_text_loud(w.get("title", ""),
-                                    TITLE_WARN_LIMIT)
-            content = cap_text_loud(w.get("content", ""), 200)
-            lines.append("  [%s] %s" % (w.get("type", "?"), title))
-            lines.append("    %s" % content)
-            lines.append("")
-        lines.append("Proceed carefully — verify this command is intentional.")
-        lines.append("[/BRAIN]")
-        return {"json": {"decision": "approve", "reason": "\n".join(lines)}}
-
-    else:
-        return {"json": {
-            "decision": "approve",
-            "reason": "[BRAIN] \u26a0\ufe0f Destructive command detected. No safety rules match, but proceed carefully. [/BRAIN]",
-        }}
+        brain._log_error('tool_moment', e, 'hook_pre_edit cue=%s' % cue[:80])
+        return {"json": {}}
+    brain.write_tool_moment(
+        chain_id=ctx.s1r_chain(), session_id=sid, cue=cue, agent_id=agent_id,
+        shown=[(n['id'], n.get('title', '')) for n in nodes])
+    return {"json": {"additionalContext": text}} if text else {"json": {}}
 
 
 def hook_session_end(brain, args, graph_changes):
@@ -848,7 +900,7 @@ def hook_worktree_context(brain, args, graph_changes):
     branch, _, project = brain.detect_git_env(cwd)
 
     # Per-session identity — replaces the global current_worktree config, which was
-    # last-writer-wins across parallel streams. session_id is backfilled from
+    # last-writer-wins across parallel sessions. session_id is backfilled from
     # CLAUDE_CODE_SESSION_ID by get_hook_input, so it's reliably present; the guard
     # stays defensive — never fall back to the singleton. Persist immediately under
     # write_lock (reentrant): set_env only mutates memory, and logs_conn writes

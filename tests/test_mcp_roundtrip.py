@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from tests.brain_test_base import BrainTestBase
 from servers.brain_mcp import TOOLS, CRITICAL_TOOLS
 from servers.daemon_dispatch import COMMAND_TABLE, dispatch_command
+from servers.trace_contract import session_short
 
 
 class TestMCPRoundTrip(BrainTestBase):
@@ -362,8 +363,7 @@ class TestMCPRoundTrip(BrainTestBase):
 
     # NOTE: test_engineering_context removed 2026-04-26.
     # The engineering_context tool was removed 2026-04-13 (was a stub
-    # returning {}). Three production-side comments confirm the deletion:
-    # daemon_dispatch.py:989, brain_mcp.py:504, brain_reminders.py:22.
+    # returning {}).
     # Roundtrip coverage of a removed tool is meaningless.
 
     def test_eval(self):
@@ -371,6 +371,20 @@ class TestMCPRoundTrip(BrainTestBase):
         result = self._dispatch("eval", {"code": "brain.conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]"})
         self.assertIsInstance(result, int)
         self.assertGreaterEqual(result, 0)
+
+    def test_gate(self):
+        """gate reads and flips the run switch in the user env file — under a
+        temp XDG_CONFIG_HOME here, never the operator's ~/.config."""
+        import tempfile
+        from unittest import mock
+        cfg = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
+            os.environ.pop("BRAIN_PAUSED", None)
+            result = self._dispatch("gate", {"action": "status"})
+            self.assertFalse(result["paused"])
+            self.assertEqual(result["env_file"], os.path.join(cfg, "brain", "env"))
+            self.assertTrue(self._dispatch("gate", {"action": "pause"})["paused"])
+            self.assertFalse(self._dispatch("gate", {"action": "resume"})["paused"])
 
     # ── Trace/log queries ──
 
@@ -522,6 +536,114 @@ class TestMCPRoundTrip(BrainTestBase):
                             for e in result["episodes"]),
                         "session scope leaked other sessions")
 
+    def test_recall_episodes_and_query_traces_filter_by_the_shown_short(self):
+        """The session filters take a session's full id or the short trace
+        headers show; both forms pull the same rows, in session_id and in
+        session_ids alike."""
+        from servers.trace_contract import session_short
+        full = '0199aa11-2b3c-7d4e-8f50-61a2b3c4d5e6'
+        other = '0199aa11-2b3c-7d4e-8f50-000000000001'
+        for sess in (full, other):
+            self.brain._trace_dal.append(
+                chain_id='short-%s' % sess, scale='s0', event_type='K',
+                ref_type='user_message', summary='shortfilter token',
+                session_id=sess)
+        for cmd, key in (("recall_episodes", "episodes"), ("query_traces", "events")):
+            by_full = {e["id"] for e in self._dispatch(
+                cmd, {"session_id": full, "limit": 50})[key]}
+            by_short = {e["id"] for e in self._dispatch(
+                cmd, {"session_id": session_short(full), "limit": 50})[key]}
+            self.assertTrue(by_full, cmd)
+            self.assertEqual(by_short, by_full, cmd)
+            both = {e["session_id"] for e in self._dispatch(
+                cmd, {"session_ids": [session_short(full), other], "limit": 50})[key]}
+            self.assertEqual(both, {full, other}, cmd)
+
+    def test_session_filter_short_resolves_only_at_the_door(self):
+        """Internal callers pass full ids to brain.query_traces /
+        recall_episodes and stay exact: a short reaching them directly
+        matches nothing, because resolution lives at the model-facing door."""
+        from servers.trace_contract import session_short
+        full = '0199aa11-2b3c-7d4e-8f50-0000000000aa'
+        self.brain._trace_dal.append(
+            chain_id='exact-%s' % full, scale='s0', event_type='K',
+            ref_type='user_message', summary='exact token', session_id=full)
+        short = session_short(full)
+        self.assertEqual(self.brain.query_traces(session_id=short)['events'], [])
+        self.assertEqual(self.brain.recall_episodes(session_id=short)['episodes'], [])
+        self.assertTrue(self._dispatch("query_traces", {"session_id": short})["events"])
+
+    def test_recall_episodes_and_query_traces_ambiguous_short_is_loud(self):
+        """Two recorded sessions sharing a short: the door refuses the short
+        and names both full ids."""
+        a = '44444444-4444-4aaa-8bbb-cccccccccccc'
+        b = '55555555-5555-4aaa-8bbb-cccccccccccc'
+        for sess in (a, b):
+            self.brain._trace_dal.append(
+                chain_id='amb-%s' % sess, scale='s0', event_type='K',
+                ref_type='user_message', summary='amb token', session_id=sess)
+        for cmd in ("recall_episodes", "query_traces"):
+            raw = dispatch_command(self.brain, cmd, {"session_id": "cccccccccccc"}, [])
+            self.assertIs(raw.get("ok"), False, cmd)
+            self.assertIn(a, raw["error"])
+            self.assertIn(b, raw["error"])
+
+    def test_query_traces_chain_id_does_not_resolve_the_session_filter(self):
+        """chain_id overrides every other filter, so a session filter beside it
+        is neither resolved nor applied — an unknown short does not fail it."""
+        self.brain._trace_dal.append(
+            chain_id='chain-only', scale='s0', event_type='K',
+            ref_type='user_message', summary='chain token',
+            session_id='chain-only-sess')
+        chain = self._dispatch("query_traces", {
+            "chain_id": "chain-only", "session_id": "f00dfacecafe"})["chain"]
+        self.assertEqual([e["summary"] for e in chain], ["chain token"])
+
+    def test_recall_episodes_and_query_traces_unresolved_short_is_loud(self):
+        """A short that names no recorded session is an error, never an empty
+        result that reads as "nothing happened in that session"."""
+        for cmd in ("recall_episodes", "query_traces"):
+            for args in ({"session_id": "f00dfacecafe"},
+                         {"session_ids": ["f00dfacecafe"]}):
+                raw = dispatch_command(self.brain, cmd, dict(args), [])
+                self.assertIs(raw.get("ok"), False, (cmd, args))
+                self.assertIn(cmd, raw["error"])
+                self.assertIn(
+                    "no session in the trace history matches 'f00dfacecafe'",
+                    raw["error"])
+
+    def test_recall_episodes_and_query_traces_empty_session_ids_is_loud(self):
+        """session_ids that names no session — [] or an empty entry — is an
+        error: downstream an empty scope is no scope, so the pull would come
+        back with every session's rows, reading as a scoped answer."""
+        for sess in ('empty-scope-A', 'empty-scope-B'):
+            self.brain._trace_dal.append(
+                chain_id='empty-%s' % sess, scale='s0', event_type='K',
+                ref_type='user_message', summary='empty scope token', session_id=sess)
+        for cmd in ("recall_episodes", "query_traces"):
+            for sids in ([], [""], ["", "empty-scope-A"]):
+                raw = dispatch_command(self.brain, cmd, {"session_ids": sids}, [])
+                self.assertIs(raw.get("ok"), False, (cmd, sids, raw))
+                self.assertIn("must name at least one session", raw["error"])
+
+    def test_query_traces_hours_bound_scoped_pull_says_so(self):
+        """A scoped pull that stays hours-bound (ref_type, grouped) carries an
+        information note naming the window — the rendered rows alone read as
+        the whole session. A grouped pull with no scope is refused."""
+        from servers.brain_mcp import render_reply
+        self.brain._trace_dal.append(
+            chain_id='hb-chain', scale='s0', event_type='K',
+            ref_type='user_message', summary='hours bound token',
+            session_id='hours-bound-sess')
+        for args in ({"session_ids": ["hours-bound-sess"], "grouped": True},
+                     {"session_id": "hours-bound-sess", "ref_type": "user_message"}):
+            raw = dispatch_command(self.brain, "query_traces", dict(args, hours=24), [])
+            self.assertIs(raw.get("ok"), True, raw)
+            self.assertIn("last 24h", render_reply("query_traces", raw), args)
+        raw = dispatch_command(self.brain, "query_traces", {"grouped": True}, [])
+        self.assertIs(raw.get("ok"), False, raw)
+        self.assertIn("needs session_id or session_ids", raw["error"])
+
     def test_recall_episodes_semantic_ranks_by_meaning(self):
         """recall_episodes with `query` ranks by cosine over the existing
         trace_embeddings, not by recency. Seed two embedded episodes (the
@@ -605,7 +727,7 @@ class TestMCPRoundTrip(BrainTestBase):
     def test_recall_episodes_ref_type_dial_optin_firehose(self):
         """Default ref_type lens is PINNED to operator dialogue
         (OPERATOR_DIALOGUE_REF_TYPES — deliberately NOT the dial, Option A):
-        tool_result, heartbeat, structural noise, AND brain/stream deliveries
+        tool_result, heartbeat, structural noise, AND brain/session deliveries
         stay out of the default even when a correspondent is enabled for
         encoding. Everything else is opt-in: a single ref_type opts into one
         lens; a list is the interleaved said+did firehose."""
@@ -685,7 +807,7 @@ class TestMCPRoundTrip(BrainTestBase):
         """The MCP proxy stamps the calling session under the reserved
         `_caller_session` key — NEVER `session_id`. That keeps session_id a
         pure caller-supplied filter, so cross-session reads (recall_episodes,
-        query_traces) default to all streams. Identity stays available under
+        query_traces) default to all sessions. Identity stays available under
         its own name; an explicit caller-supplied session_id is preserved.
 
         (Adapted from the old recall_episodes-specific denylist test: the fix
@@ -714,8 +836,8 @@ class TestMCPRoundTrip(BrainTestBase):
 
     def test_recall_episodes_no_scope_is_cross_session(self):
         """recall_episodes with the ambient `_caller_session` present but NO
-        explicit session_id must span ALL streams. This is the freshly-awoken
-        stream case: identity is known, but an unscoped recall reaches all of
+        explicit session_id must span ALL sessions. This is the freshly-awoken
+        session case: identity is known, but an unscoped recall reaches all of
         itself — the original bug auto-scoped it to the newborn session."""
         from servers.dispatch_common import CALLER_SESSION_KEY
         for sess in ('re-xsess-A', 're-xsess-B'):
@@ -729,13 +851,13 @@ class TestMCPRoundTrip(BrainTestBase):
         sessions = {e["session_id"] for e in eps}
         self.assertEqual(
             sessions, {'re-xsess-A', 're-xsess-B'},
-            "_caller_session scoped recall_episodes to the calling stream — "
-            "the all-streams default was overridden (the original bug)")
+            "_caller_session scoped recall_episodes to the calling session — "
+            "the all-sessions default was overridden (the original bug)")
 
     def test_query_traces_no_scope_is_cross_session(self):
         """query_traces shares recall_episodes' contract: the ambient
         `_caller_session` must NOT scope the pull (the latent bug the stopgap
-        denylist never covered). An omitted session_id spans all streams."""
+        denylist never covered). An omitted session_id spans all sessions."""
         from servers.dispatch_common import CALLER_SESSION_KEY
         for sess in ('qt-xsess-A', 'qt-xsess-B'):
             self.brain._trace_dal.append(
@@ -748,7 +870,7 @@ class TestMCPRoundTrip(BrainTestBase):
         self.assertIn('qt-xsess-A', sessions)
         self.assertIn('qt-xsess-B', sessions,
                       "_caller_session scoped query_traces to the calling "
-                      "stream — the all-streams default was overridden")
+                      "session — the all-sessions default was overridden")
 
     def test_caller_session_reaches_attribution_handler(self):
         """An identity (attribution) command must reach the calling session via
@@ -774,6 +896,26 @@ class TestMCPRoundTrip(BrainTestBase):
                         "session via _caller_session")
         self.assertTrue(all(e["session_id"] == sess for e in events),
                         "attribution handler did not stamp the caller session")
+
+    def test_connect_attributed_to_stamp_not_written_session_id(self):
+        """A session_id the model writes beside the stamp is not identity: the
+        edge trace belongs to the stamped caller, and nothing lands under the
+        written value."""
+        from servers.dispatch_common import CALLER_SESSION_KEY
+        sess, written = "connect-attrib-5b1e", "written-5b1e"
+        a = self._dispatch("remember", {"type": "concept", "title": "Stamp attrib A",
+                                        "content": "node A for stamped connect attribution."})["id"]
+        b = self._dispatch("remember", {"type": "concept", "title": "Stamp attrib B",
+                                        "content": "node B for stamped connect attribution."})["id"]
+        self._dispatch("connect", {
+            "source_id": a, "target_id": b, "relation": "grounds_stamp_probe",
+            "description": "edge whose trace must follow the stamped caller.",
+            CALLER_SESSION_KEY: sess, "session_id": written})
+        edges = self.brain.query_traces(session_id=sess, hours=None,
+                                        ref_type="edge_relation_revised")["events"]
+        self.assertTrue(edges, "connect's edge trace was not attributed to the stamp")
+        self.assertEqual(self.brain.query_traces(
+            session_id=written, hours=None, ref_type="edge_relation_revised")["events"], [])
 
     def test_remember_emits_attributed_node_created_and_edge_traces(self):
         """Step 6 pins. (a) remember through dispatch emits a node_created
@@ -811,7 +953,7 @@ class TestMCPRoundTrip(BrainTestBase):
         attribute its trace to the caller carried under the ambient
         _caller_session key. Guards the per-op-type attribution split: a sub-op
         that fails to propagate identity emits an unattributed (session_id='')
-        trace, invisible to per-stream forensics. The fix propagates identity
+        trace, invisible to per-session forensics. The fix propagates identity
         under the reserved key into every op's op_args."""
         from servers.dispatch_common import CALLER_SESSION_KEY
         sess = "batch-attrib-7a2e"
@@ -837,6 +979,36 @@ class TestMCPRoundTrip(BrainTestBase):
         self.assertTrue(edges, "batch connect op emitted no caller-attributed edge_relation_revised trace")
         self.assertTrue(all(e["session_id"] == sess for e in revised + edges),
                         "a brain_batch sub-op trace was not attributed to the caller session")
+
+    def test_brain_batch_sub_ops_take_the_batch_caller_over_their_own(self):
+        """An op that carries its own `_caller_session` or session_id still
+        runs as the batch's caller — the proxy scrubs only the top level, so
+        the batch assigns identity to every op rather than defaulting it."""
+        from unittest import mock
+        from servers import dispatch_write
+        from servers.dispatch_common import CALLER_SESSION_KEY, caller_session
+        seen = []
+
+        def _record(brain, op_args, graph_changes):
+            seen.append(caller_session(op_args))
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(dispatch_write, "_handle_revise", _record), \
+                mock.patch.object(dispatch_write, "_handle_remember", _record), \
+                mock.patch.object(dispatch_write, "_handle_connect", _record):
+            self._dispatch("brain_batch", {
+                CALLER_SESSION_KEY: "batch-caller-4d1a",
+                "operations": [
+                    {"op": "revise", "node_id": "n1", "reason": "r",
+                     "content": "c", CALLER_SESSION_KEY: "op-stamp"},
+                    {"op": "revise", "node_id": "n2", "reason": "r",
+                     "content": "c", "session_id": "op-sid"},
+                    {"op": "remember", "type": "concept", "title": "t",
+                     "content": "c", CALLER_SESSION_KEY: "op-stamp"},
+                    {"op": "connect", "source_id": "a", "target_id": "b",
+                     "relation": "grounds", "description": "d",
+                     CALLER_SESSION_KEY: "op-stamp"}]})
+        self.assertEqual(seen, ["batch-caller-4d1a"] * 4)
 
     def test_check_unknown_keys_exempts_caller_session(self):
         """check_unknown_keys (run by the daemon BEFORE every handler) must not
@@ -865,7 +1037,7 @@ class TestMCPRoundTrip(BrainTestBase):
     def test_stamp_then_dispatch_reads_are_cross_session(self):
         """End-to-end composition: what the proxy ACTUALLY stamps
         (_stamp_caller_session) fed into the filter reads must still span all
-        streams. The handler-only cross-session tests inject _caller_session by
+        sessions. The handler-only cross-session tests inject _caller_session by
         hand; this guards the proxy half — a regression re-injecting session_id
         at daemon_send for reads would slip past those."""
         import os
@@ -881,7 +1053,7 @@ class TestMCPRoundTrip(BrainTestBase):
             self.assertNotIn("session_id", args, "proxy injected session_id into a read")
             eps = self._dispatch("recall_episodes", args)["episodes"]
             self.assertEqual({e["session_id"] for e in eps}, {"compose-A", "compose-B"},
-                             "stamp+dispatch scoped recall_episodes to the caller stream")
+                             "stamp+dispatch scoped recall_episodes to the caller session")
             qt = self._dispatch("query_traces",
                                 _stamp_caller_session({"hours": 1, "limit": 500}))["events"]
             seen = {e["session_id"] for e in qt}
@@ -895,20 +1067,83 @@ class TestMCPRoundTrip(BrainTestBase):
 
     def test_stamp_caller_session_scrubs_forged_key(self):
         """The proxy is the SOLE writer of _caller_session: with the session env
-        unset it must SCRUB an inbound _caller_session rather than let the
-        daemon honor it as identity (MCP payloads can carry arbitrary keys)."""
+        unset it must SCRUB an inbound _caller_session to an empty stamp rather
+        than let the daemon honor it as identity (MCP payloads can carry
+        arbitrary keys)."""
         import os
         from servers.brain_mcp import _stamp_caller_session, CALLER_SESSION_KEY
         prev = os.environ.get("CLAUDE_CODE_SESSION_ID")
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         try:
-            scrubbed = _stamp_caller_session({CALLER_SESSION_KEY: "forged-stream", "x": 1})
-            self.assertNotIn(CALLER_SESSION_KEY, scrubbed,
+            scrubbed = _stamp_caller_session({CALLER_SESSION_KEY: "forged-session", "x": 1})
+            self.assertEqual(scrubbed.get(CALLER_SESSION_KEY), "",
                              "a forged _caller_session was trusted when the env was unset")
             self.assertEqual(scrubbed.get("x"), 1, "scrub clobbered unrelated args")
         finally:
             if prev is not None:
                 os.environ["CLAUDE_CODE_SESSION_ID"] = prev
+
+    def test_unattributed_proxy_call_cannot_claim_a_written_session(self):
+        """A proxy call the host gave no identity reaches the daemon with an
+        EMPTY stamp, so a session_id the model writes is not read as identity:
+        self_inbox(session_id=<sibling>) leaves the sibling's inbox alone. A
+        direct daemon_client caller (the poller, hooks) writes no stamp and
+        still names itself with session_id."""
+        import os
+        from servers.brain_mcp import _stamp_caller_session
+        from servers.channels.self_channel import signal
+        sibling = "51b11ae0-1111-2222-3333-444444444444"
+        self._dispatch("self_send", {"to": sibling, "body": "for the sibling",
+                                     "from_session": "roundtrip-sender"})
+        prev = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        try:
+            args = _stamp_caller_session({"session_id": sibling})
+        finally:
+            if prev is not None:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = prev
+        refused = dispatch_command(self.brain, "self_inbox", args, [])
+        self.assertIs(refused.get("ok"), False, refused)
+        self.assertEqual([m["body"] for m in signal.peek_inbox(self.brain, sibling)],
+                         ["for the sibling"],
+                         "an unattributed proxy call drained another session's inbox")
+        # The sender side too: a written from_session neither sends as nor
+        # reads the outbox of the session it names.
+        prev = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        try:
+            send = _stamp_caller_session({"to": sibling, "body": "spoofed",
+                                          "from_session": "roundtrip-sender"})
+            outbox = _stamp_caller_session({"from_session": "roundtrip-sender"})
+        finally:
+            if prev is not None:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = prev
+        for cmd, cmd_args in (("self_send", send), ("self_outbox", outbox)):
+            raw = dispatch_command(self.brain, cmd, cmd_args, [])
+            self.assertIs(raw.get("ok"), False, (cmd, raw))
+        # A direct daemon_client caller (no stamp) still names itself.
+        drained = self._dispatch("self_inbox", {"session_id": sibling})
+        self.assertEqual([m["body"] for m in drained["messages"]], ["for the sibling"])
+
+    def test_unattributed_live_remind_cannot_broadcast_as_a_written_session(self):
+        """remind(for_whom='live') speaks as the filing session, so thalamus
+        refuses it without one. An unattributed proxy call is anonymous: a
+        session_id the model writes beside it must not become that sender."""
+        import os
+        from servers.brain_mcp import _stamp_caller_session
+        sibling = "51b11ae0-2222-3333-4444-555555555555"
+        prev = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        try:
+            args = _stamp_caller_session({"what": "spoofed live broadcast",
+                                          "for_whom": "live", "session_id": sibling})
+        finally:
+            if prev is not None:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = prev
+        raw = dispatch_command(self.brain, "remind", args, [])
+        self.assertIs(raw.get("ok"), False, raw)
+        self.assertIn("requires a filing session", raw["error"])
+        sent = self.brain.logs_conn.execute(
+            "SELECT COUNT(*) FROM self_inflight WHERE body = 'spoofed live broadcast'"
+        ).fetchone()[0]
+        self.assertEqual(sent, 0, "an unattributed call broadcast as the session it named")
 
     def test_recall_episodes_all_scales_not_collapsed(self):
         """scale='' (all scales) must NOT collapse to the s0 conversational
@@ -1109,26 +1344,26 @@ class TestMCPRoundTrip(BrainTestBase):
     # ── Self channel (presence — pull) ──
 
     def test_self_presence(self):
-        """self_presence returns a roster of live streams + a rendered line.
+        """self_presence returns a roster of live sessions + a rendered line.
 
-        Liveness/focus come from real-turn S0 traces (present_streams reads
-        traces, not session_state), so seed a user_message trace for the stream."""
+        Liveness/focus come from real-turn S0 traces (present_sessions reads
+        traces, not session_state), so seed a user_message trace for the session."""
         self.brain._trace_dal.append(
             chain_id='s0-rtstrmA-0', scale='s0', event_type='K',
             ref_type='user_message', summary='roundtrip focus A',
-            session_id='roundtrip-stream-A')
+            session_id='roundtrip-session-A')
         result = self._dispatch("self_presence", {"session_id": "roundtrip-self", "limit": 5})
-        self.assertIn("streams", result)
+        self.assertIn("sessions", result)
         self.assertIn("line", result)
-        self.assertIsInstance(result["streams"], list)
-        ids = {s["session_id"] for s in result["streams"]}
-        self.assertIn("roundtrip-stream-A", ids)
+        self.assertIsInstance(result["sessions"], list)
+        ids = {s["session_id"] for s in result["sessions"]}
+        self.assertIn("roundtrip-session-A", ids)
 
     def test_self_peek(self):
-        """self_peek returns one stream's full current focus."""
+        """self_peek returns one session's full current focus."""
         self.brain.set_config('session_context_roundtrip-peek',
                               'peek focus line one\nline two')
-        result = self._dispatch("self_peek", {"stream_id": "roundtrip-peek"})
+        result = self._dispatch("self_peek", {"session_id": "roundtrip-peek"})
         self.assertTrue(result["found"])
         self.assertEqual(result["focus"], "peek focus line one\nline two")
 
@@ -1164,13 +1399,14 @@ class TestMCPRoundTrip(BrainTestBase):
             "to": recipient, "body": "did you get this?", "from_session": sender})
         result = self._dispatch("self_outbox", {"from_session": sender})
         self.assertIn("messages", result)
-        directed = [m for m in result["messages"] if m.get("target") == recipient[:8]]
+        directed = [m for m in result["messages"]
+                    if m.get("target") == session_short(recipient)]
         self.assertTrue(directed, "outbox must show the directed message just sent")
         # nobody has drained it yet → still pending (silence read correctly)
         self.assertTrue(directed[0]["pending"])
         self.assertEqual(directed[0]["delivered_to"], [])
 
-    # ── Thalamus (the brain speaking to its streams) ──
+    # ── Thalamus (the brain speaking to its sessions) ──
 
     def test_remind(self):
         """remind files a Thalamus item — the producer verb. An ask
@@ -1183,6 +1419,28 @@ class TestMCPRoundTrip(BrainTestBase):
         self.assertEqual(result["route"], "queue")
         self.assertEqual(result["audience"], "every_session")
         self.assertTrue(result["expires_at"])
+
+    def test_remind_for_whom_accepts_a_live_sessions_short(self):
+        """A directed reminder names its session the way self_send names a
+        target: full id or short, resolved against the live sessions. The item
+        stores the full id; a short matching no live session is refused loudly,
+        and the audience words pass through untouched."""
+        from servers.trace_contract import session_short
+        full = 'aaaaaaaa-1111-4222-8333-555555555555'
+        self.brain.stamp_boot_liveness(full)
+        filed = self._dispatch("remind", {
+            "what": "roundtrip: for one session", "for_whom": session_short(full)})
+        target = self.brain.logs_conn.execute(
+            "SELECT target_session FROM thalamus_items WHERE id = ?",
+            (filed["id"],)).fetchone()[0]
+        self.assertEqual(target, full)
+        raw = dispatch_command(self.brain, "remind", {
+            "what": "roundtrip: nobody", "for_whom": "f00dfacecafe"}, [])
+        self.assertIs(raw.get("ok"), False)
+        self.assertIn("no live session matches 'f00dfacecafe'", raw["error"])
+        self.assertEqual(self._dispatch("remind", {
+            "what": "roundtrip: everyone", "for_whom": "all"})["audience"],
+            "every_session")
 
     def test_remind_expires_sets_the_window(self):
         """`expires` reaches the door: it replaces the kind's default window,
@@ -1363,7 +1621,7 @@ class TestMissingEnvelopeIsLoud(unittest.TestCase):
         # daemon_send returns a raw payload dict (no ok/result/error) — exactly
         # what an un-enveloped handler produces over the wire.
         with mock.patch.object(brain_mcp, "daemon_send",
-                               return_value={"streams": [], "line": ""}):
+                               return_value={"sessions": [], "line": ""}):
             resp = brain_mcp.handle_tools_call(
                 "req-1", {"name": "self_presence", "arguments": {}})
         payload = resp["result"]
@@ -1372,8 +1630,184 @@ class TestMissingEnvelopeIsLoud(unittest.TestCase):
         self.assertIn("envelope", text)
         self.assertNotIn("Unknown daemon error", text)
         # the offending keys are surfaced for fast diagnosis
-        self.assertIn("streams", text)
+        self.assertIn("sessions", text)
         self.assertIn("line", text)
+
+
+class TestToolCallRetryIsAtMostOnce(unittest.TestCase):
+    """handle_tools_call resends a tool call only when it never ran: the
+    connection was refused, the request was reset unread in a reloading
+    daemon's listen queue, or the daemon declined it before running
+    (NOT_RUN_FIELD, a busy write lock). A daemon that read the call may have
+    committed it, so a timeout, an empty or garbled reply, or any other error
+    the daemon returned is never resent: a resent `remember` lands twice.
+
+    A stub daemon on a real socket records every request it reads; the proxy's
+    wire (send_command) is pointed at it with a short timeout."""
+
+    CLIENT_TIMEOUT = 0.3
+
+    def setUp(self):
+        import socket
+        import threading
+        from unittest import mock
+        self.received = []     # cmd of every request the stub read
+        self.replied = threading.Event()
+        self.delay_first = 0.0
+        self.reply = {"ok": True, "result": {"id": "abc12345"}}
+        self.reply_first = None  # the stub's answer to its first request
+        self.close_first = False  # read the first request, close unanswered
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(8)
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+        # A port with nothing bound to it: connect is refused.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        self.dead_port = probe.getsockname()[1]
+        probe.close()
+        self.refuse_first = 0  # tool calls to send to the dead port first
+        for p in (mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "test-sess"}),
+                  mock.patch("time.sleep")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        self.listener.close()
+
+    def _serve(self):
+        import json
+        import threading
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            with conn:
+                cmd = json.loads(conn.makefile().readline())["cmd"]
+                self.received.append(cmd)
+                if self.close_first and len(self.received) == 1:
+                    self.replied.set()
+                    continue                   # closes with the request read
+                if self.delay_first and len(self.received) == 1:
+                    # The write commits, slowly. Not time.sleep: setUp
+                    # mocks it to skip the proxy's backoff.
+                    threading.Event().wait(self.delay_first)
+                reply = self.reply
+                if self.reply_first and len(self.received) == 1:
+                    reply = self.reply_first
+                try:
+                    conn.sendall((json.dumps(reply) + "\n").encode())
+                except OSError:
+                    pass                           # the client gave up
+                self.replied.set()
+
+    def _call(self, name="remember"):
+        from unittest import mock
+        from servers import brain_mcp
+        from servers.daemon_client import send_command
+        sent = []
+
+        def wire(cmd, args=None, timeout=None, role=None):
+            port = self.port
+            if cmd == name:
+                sent.append(cmd)
+                if len(sent) <= self.refuse_first:
+                    port = self.dead_port
+            return send_command(cmd, args, timeout=self.CLIENT_TIMEOUT, port=port, role=role)
+
+        with mock.patch.object(brain_mcp, "send_command", wire):
+            resp = brain_mcp.handle_tools_call(
+                "req-1", {"name": name, "arguments": {"title": "t", "content": "c"}})
+        return resp["result"], sent
+
+    def test_slow_daemon_write_is_sent_once(self):
+        self.delay_first = self.CLIENT_TIMEOUT * 3
+        out, sent = self._call()
+        self.assertTrue(self.replied.wait(5), "stub never finished the write")
+        self.assertEqual(sent, ["remember"])
+        self.assertEqual(self.received.count("remember"), 1)
+        self.assertTrue(out.get("isError"))
+        self.assertIn("timeout", out["content"][0]["text"].lower())
+
+    def test_empty_reply_after_the_daemon_read_the_call_is_not_resent(self):
+        # A handler killed mid-run closes a connection it already read: the
+        # write may have committed, so the proxy reports instead of resending.
+        self.close_first = True
+        out, sent = self._call()
+        self.assertEqual(sent, ["remember"])
+        self.assertEqual(self.received.count("remember"), 1)
+        self.assertTrue(out.get("isError"))
+        # The empty-reply path itself, not a timeout that would also send once.
+        self.assertIn("empty response", out["content"][0]["text"])
+
+    def test_daemon_error_naming_a_timeout_is_not_resent(self):
+        # The daemon answered: the call ran. Its error text mentioning
+        # "timeout" or "connection" says nothing about the wire.
+        self.reply = {"ok": False, "error": "LLM timeout on the connection pool"}
+        out, sent = self._call()
+        self.assertEqual(sent, ["remember"])
+        self.assertEqual(self.received.count("remember"), 1)
+        self.assertTrue(out.get("isError"))
+
+    def test_refused_connection_is_retried_until_the_daemon_is_back(self):
+        # A restarting daemon refuses the first try; the retry reaches it.
+        self.refuse_first = 1
+        out, sent = self._call()
+        self.assertEqual(sent, ["remember", "remember"])
+        self.assertEqual(self.received.count("remember"), 1)
+        self.assertNotIn("isError", out)
+
+    def test_write_declined_for_a_busy_lock_is_retried(self):
+        # The daemon answered without running the call: it marks the reply
+        # NOT_RUN_FIELD, and the resend is the call's only run.
+        from servers.contract import NOT_RUN_FIELD
+        self.reply_first = {"ok": False, NOT_RUN_FIELD: True,
+                            "error": "Write lock timeout — another operation is holding the lock"}
+        out, sent = self._call()
+        self.assertEqual(sent, ["remember", "remember"])
+        self.assertNotIn("isError", out)
+
+    def test_call_cut_off_by_a_reload_is_retried(self):
+        # The daemon's listen queue held the request unread when the reload
+        # closed the socket: nothing ran, so the retry is the only delivery.
+        import socket
+        import threading
+        from unittest import mock
+        from servers import brain_mcp
+        from servers.daemon_client import send_command
+        sent = []
+        first = {}
+
+        def wire(cmd, args=None, timeout=None, role=None):
+            if cmd != "remember":
+                return send_command(cmd, args, timeout=self.CLIENT_TIMEOUT, port=self.port, role=role)
+            sent.append(cmd)
+            if len(sent) > 1:
+                return send_command(cmd, args, timeout=self.CLIENT_TIMEOUT, port=self.port, role=role)
+            reloading = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reloading.bind(("127.0.0.1", 0))
+            reloading.listen(1)
+            threading.Timer(0.1, reloading.close).start()
+            first.update(send_command(cmd, args, timeout=2.0, port=reloading.getsockname()[1]))
+            return first
+
+        with mock.patch.object(brain_mcp, "send_command", wire):
+            out = brain_mcp.handle_tools_call(
+                "req-1", {"name": "remember", "arguments": {"title": "t", "content": "c"}})["result"]
+        self.assertEqual(first.get("transport"), "reset",
+                         "the first try must hit the reload window, not a refused port")
+        self.assertEqual(sent, ["remember", "remember"])
+        self.assertEqual(self.received.count("remember"), 1)
+        self.assertNotIn("isError", out)
+
+    def test_refused_every_time_gives_up_after_three_tries(self):
+        self.refuse_first = 99
+        out, sent = self._call()
+        self.assertEqual(sent, ["remember"] * 3)
+        self.assertEqual(self.received.count("remember"), 0)
+        self.assertTrue(out.get("isError"))
 
 
 class TestAgentLimit(unittest.TestCase):

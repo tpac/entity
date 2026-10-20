@@ -17,7 +17,7 @@ brings the relevant ones back before it replies. A correction stays attached
 to the belief it fixed and is recalled with it.
 
 It is a plugin for Claude Code, its main host. It also runs in OpenAI's Codex,
-where version 0.9 works but isn't optimized yet. The memory lives on your
+where it works but isn't optimized yet. The memory lives on your
 machine; the model it runs on can change, and what it accumulated stays.
 
 **Before you start:** Entity is for people who already use Claude Code or
@@ -45,7 +45,7 @@ before installing — the rename means it is not an in-place update.
   that stays up until it's answered
 - Lets parallel sessions of the same entity see and message each other, in
   Claude Code and Codex
-- Shows what it keeps in a local, read-only dashboard
+- Shows what it keeps in a local dashboard
 
 ## See it once
 
@@ -69,21 +69,30 @@ Then start a Claude Code session. First boot sets up the runtime, creates a
 fresh brain, and seeds it with a small pack of identity and mechanism
 memories it grows from.
 
-Add your API key in the plugin's settings when Claude Code asks, or put
-`ANTHROPIC_API_KEY=...` in `~/.config/brain/env`. A key exported only in your
-shell doesn't reach Entity's background process on macOS, because macOS
-(launchd) starts that process outside your shell.
+Add your API key in one of two places:
+
+1. **The plugin's settings**, when Claude Code asks for it.
+2. **Entity's local setup page**, <http://localhost:47303/setup>. On a keyless
+   first boot Entity starts its dashboard and the boot message points there;
+   paste the key into the form.
+
+Both save the key to `~/.config/brain/env`, which you can also edit by hand
+(`ANTHROPIC_API_KEY=...`). A key exported only in your shell doesn't reach
+Entity's background process on macOS, because macOS (launchd) starts that
+process outside your shell.
 
 A first thing to try: tell it something about how you work, then open a new
 session and ask what it knows about that.
 
 ### Codex (ChatGPT desktop, Codex mode)
 
-Version 0.9 works with Codex, but it isn't optimized for Codex yet.
+Entity works with Codex, but it isn't optimized for Codex yet.
 
 Entity ships a Codex manifest too (`.codex-plugin/plugin.json`, hooks in
-`hooks/hooks.codex.json`). The `codex` CLI lives inside the app at
-`/Applications/ChatGPT.app/Contents/Resources/codex` if it is not on your PATH.
+`hooks/hooks.codex.json`). The `codex` CLI ships inside the ChatGPT app and is
+not on your PATH by default; `python3 hooks/adapters/codex_onboarding.py`
+prints where this app keeps it (`Contents/Resources/codex-cli/bin/codex` since
+ChatGPT.app 26.928, `Contents/Resources/codex` before).
 
 ```bash
 codex plugin marketplace add tpac/entity
@@ -91,12 +100,17 @@ codex plugin add entity@anchor
 ```
 
 Once Entity's tools are connected, ask **“Finish Entity setup.”** One in-app
-confirmation explains Entity-wide tool permission and automatic memory. Accepting
-saves permission for Entity's current and future tools, including memory changes
-and messages, while preserving your individual tool restrictions. If hooks need
-trust, Codex then opens its own review in a terminal window; you choose which
-hooks to trust without typing commands. Return here to check setup. An existing
-connection may need to reload before using the saved tool permission.
+confirmation asks for Entity-wide tool permission. Accepting saves permission for
+Entity's current and future tools, including memory changes and messages, while
+preserving your individual tool restrictions. Automatic-memory hooks are approved
+in Codex itself: in the app, open **Settings → Hooks** or click the icon with a
+yellow dot beside the message box (Review hooks); in the CLI, type `/hooks`. Entity tells you when any of its
+hooks are waiting. An existing connection may need to reload before using the
+saved tool permission.
+
+Codex has no plugin settings form, so add your API key through the setup page
+(<http://localhost:47303/setup>) or `~/.config/brain/env`, as under
+[Install](#install).
 
 Codex runs plugins from a cache copy. Direct marketplace installs may need to
 finish runtime bootstrap and reconnect before tools appear.
@@ -151,7 +165,7 @@ and across Claude Code and Codex.
   (ownership, duplicated logic, where new code belongs), checking earlier
   decisions in memory first
 
-**A place to look** — the dashboard is read-only and local, and shows what
+**A place to look** — a local dashboard that shows what
 the entity has stored.
 
 ## When Entity isn't a fit
@@ -176,6 +190,9 @@ the entity has stored.
 
 Also worth knowing before you install:
 
+- **It assumes one person per machine.** Its tools and its background
+  process have no authentication: any program on the machine can talk to the
+  background process, and anything running as you can read the brain's files.
 - **It keeps a verbatim local record of its conversations** — your messages,
   its replies, and its tool activity — so anything you type or paste,
   including secrets, ends up there. That record is what episodic recall
@@ -227,7 +244,7 @@ servers/          the engine — recall, encoding, graph, daemon, dispatch
   scales/s2/      idle-time maintenance: consolidation, communities, healing
 hooks/            Claude Code hooks — boot, recall, encoding triggers
 skills/           the identity layer and its operating instructions
-dashboard/        local read-only observer UI (127.0.0.1)
+dashboard/        local observer UI (127.0.0.1)
 tests/            unit, contract, and integration suites
 ```
 
@@ -299,6 +316,8 @@ file if it does not exist):
 | `BRAIN_AGENT_NAME` | `Jade` | What the entity is called — its name is yours to choose |
 | `BRAIN_OPERATOR_NAME` | — | Your name, as the conversation record stores it |
 | `BRAIN_ENCODE_EVERY` | `5` | Conversation turns between encoding passes |
+| `BRAIN_PAUSED` | — | Set `1` to pause the brain: no boot context, recall, recording or encoding in any session until you unset it. The `gate` tool flips it from inside a session (`gate pause` / `gate resume`) |
+| `BRAIN_IGNORE_PROJECTS` | — | Projects the brain stays out of: comma-separated patterns matched against a repo's folder name (`client-*`), every worktree included; a leading `!` makes an include, so `*,!work` keeps only `work`. `gate ignore` / `gate unignore` edit it |
 | `BRAIN_PARKED_ACK` | — | Set `1` to silence the relocation notice if you deliberately keep the brain in a plugin-managed folder |
 
 ## FAQ

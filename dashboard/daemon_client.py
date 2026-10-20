@@ -13,12 +13,12 @@ DAEMON_HOST = "127.0.0.1"  # = servers.daemon_config.DAEMON_HOST; tests/test_das
 DAEMON_PORT = int(os.environ.get("BRAIN_DAEMON_PORT") or (47200 + os.getuid() % 100))  # env (brain-env.sh) is the live source; formula is the fallback
 
 
-def daemon_send(cmd: str, args=None, timeout: float = 10):
-    """Send a command to the daemon, return result or None.
-
-    Returns None on any failure (connection refused, timeout, daemon-side
-    error). Callers must handle None — the dashboard never crashes because
-    the daemon is down.
+def daemon_call(cmd: str, args=None, timeout: float = 10) -> dict:
+    """Send a command to the daemon and return its whole reply envelope,
+    {"ok": True, "result": …} or {"ok": False, "error": …}; a daemon that
+    cannot be reached answers {"ok": False, "error": "daemon unreachable"}.
+    For the dashboard's operator-facing writes (pause, the API key), whose
+    pages show the daemon's own refusal text.
 
     This is the ONE sanctioned copy of the wire protocol
     (servers.daemon_client.send_command is the owner): the dashboard must keep
@@ -43,11 +43,22 @@ def daemon_send(cmd: str, args=None, timeout: float = 10):
                 break
         s.close()
         resp = json.loads(b"".join(chunks).decode("utf-8").strip())
-        if resp.get("ok"):
-            return resp.get("result")
-        return None
+        if isinstance(resp, dict):
+            return resp
     except Exception:
-        return None
+        pass
+    return {"ok": False, "error": "daemon unreachable"}
+
+
+def daemon_send(cmd: str, args=None, timeout: float = 10):
+    """Send a command to the daemon, return result or None.
+
+    Returns None on any failure (connection refused, timeout, daemon-side
+    error). Callers must handle None — the dashboard never crashes because
+    the daemon is down. The read-side shape over daemon_call.
+    """
+    resp = daemon_call(cmd, args, timeout)
+    return resp.get("result") if resp.get("ok") else None
 
 
 def daemon_alive() -> bool:

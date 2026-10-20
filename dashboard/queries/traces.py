@@ -53,7 +53,7 @@ def query_traces(conn, hours: int = 24, scale: str = '', limit: int = 500, sessi
 
 
 # The two s0 ref_types that hold what was actually SAID in a session's own
-# conversation — the operator's prompt and the stream's reply.
+# conversation — the operator's prompt and the session's reply.
 _SAID = ('user_message', 'assistant_message')
 
 
@@ -61,9 +61,9 @@ _SAID = ('user_message', 'assistant_message')
 def query_session_messages(conn, session_id: str, limit: int = 8):
     """The last few turns of ONE session's own operator conversation.
 
-    Identity, not content: the Streams tab shows these so the operator can
-    recognise WHICH session a stream is ("oh, that's the one where I asked
-    about X"). A stream's handle, model and turn count say what it is; a
+    Identity, not content: the Sessions tab shows these so the operator can
+    recognise WHICH session it is ("oh, that's the one where I asked
+    about X"). A session's handle, model and turn count say what it is; a
     couple of its own lines say what it's for.
 
     Deliberately narrow — `query_traces` above would haul the session's whole
@@ -80,7 +80,7 @@ def query_session_messages(conn, session_id: str, limit: int = 8):
     for ref_type, summary, metadata, created_at in rows:
         content, model = extract_meta_fields(metadata, 'content', 'model')
         out.append({
-            "role": 'operator' if ref_type == 'user_message' else 'stream',
+            "role": 'operator' if ref_type == 'user_message' else 'session',
             "text": content or summary or '',
             "model": model or '',
             "created_at": created_at,

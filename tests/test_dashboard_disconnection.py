@@ -305,6 +305,33 @@ def test_mirrored_primary_aspects_match_the_registry(tmp_path, monkeypatch):
             t: registry.by_node_type(t).name for t in types}
 
 
+def test_mirrored_gate_grammar_in_config_tab():
+    # The Config tab reads two pieces of the gate's grammar off the status
+    # reply: the verdict reason that means "paused" and the prefix that marks
+    # an include pattern. JS cannot import them, so the literals are pinned.
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from servers.brain_gate import INCLUDE_PREFIX, REASON_PAUSED
+    js = (DASHBOARD / 'static' / 'tabs' / 'config.js').read_text()
+    assert "v.reason === '%s'" % REASON_PAUSED in js, (
+        'config.js compares the verdict reason to a literal that is not brain_gate.REASON_PAUSED')
+    assert "startsWith('%s')" % INCLUDE_PREFIX in js, (
+        'config.js splits include patterns on a prefix that is not brain_gate.INCLUDE_PREFIX')
+    assert "'%s'" % INCLUDE_PREFIX in js and "startsWith('" + INCLUDE_PREFIX in js
+
+
+def test_mirrored_session_short_in_sessions_js():
+    # The browser labels a session by sessionShort(id), the dashboard's one
+    # copy of trace_contract.session_short. A drifted copy names a session by a
+    # short its chains, logs and presence never show.
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from servers.trace_contract import SESSION_SHORT_CHARS
+    js = (DASHBOARD / 'static' / 'lib' / 'sessions.js').read_text()
+    assert ("return (id || '').replace(/-/g, '').slice(-%d);" % SESSION_SHORT_CHARS
+            in js), 'sessions.js sessionShort is not trace_contract.session_short'
+
+
 def test_mirrored_user_message_fields():
     # The encode chip skips wake envelopes by the marker; the Surface card skips
     # turns the hook registered without surface by the stamp. A drifted copy

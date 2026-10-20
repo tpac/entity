@@ -9,19 +9,87 @@
 # surfaces adoption instead — silent data loss is worse than a blocked boot.
 
 
-# Save stdin early — inline python commands below would consume it.
-# Extract session_id from hook input and pass as env var.
+# Save stdin early — inline python commands below would consume it. ONE
+# system-python3 pass pulls the three fields boot needs out of the payload,
+# then asks two questions. First, can this machine reach the daemon at all
+# (hook_common.daemon_unreachable_here)? Cowork's cloud VM cannot: no runtime,
+# brain or daemon belongs there, and the gate's config file there is not the
+# operator's, so this comes before the gate. Second, the brain gate
+# (servers/brain_gate.py): a paused brain, or a
+# project the operator told the brain to ignore, means this session gets no
+# boot context and every later hook declines on its own (hook_common.run_hook
+# asks the same gate) — the daemon never hears from it. Decided BEFORE any of
+# the work below (runtime, daemon, MCP check), stdlib only, so it costs the
+# same whether or not the runtime is installed. The fields print first and an
+# import failure in either check is caught, so a damaged install still boots
+# (ungated, loudly on stderr) with its fields intact. Exit 3 = no boot here, remote or
+# gated: one notice line (hook_common.REMOTE_HOOK_NOTICE or brain_gate.notice)
+# is the hook's whole stdout, so the session learns the brain is off here
+# instead of wondering why it went quiet; it is printed after the three fields
+# (not on resume/compact) and emitted by the shell. Subshell cd pins
+# sys.path[0] to the plugin root (the same hazard note as the daemon-ensure
+# call below).
+#   session_id → the daemon's session identity; cwd → session identity
+#   (cwd/branch/project, SessionContext.cwd / session_env_for); source →
+#   startup vs resume/compact (SessionStart fires for all of them, and
+#   per-session notices must not re-inject on every compaction).
 HOOK_STDIN=$(cat)
-BRAIN_HOOK_SESSION_ID=$(echo "$HOOK_STDIN" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('session_id',''))" 2>/dev/null)
-export BRAIN_HOOK_SESSION_ID
-# cwd from hook input — fed to the daemon as session identity (the daemon never
-# introspects the Claude env itself). See SessionContext.cwd / session_env_for.
-BRAIN_HOOK_CWD=$(echo "$HOOK_STDIN" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('cwd',''))" 2>/dev/null)
-export BRAIN_HOOK_CWD
-# source distinguishes a real session start from resume/compact — SessionStart
-# fires for all of them (empty matcher), and per-session notices must not
-# re-inject on every compaction of a long session.
-BRAIN_HOOK_SOURCE=$(echo "$HOOK_STDIN" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('source',''))" 2>/dev/null)
+_BOOT_PLUGIN_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+_BOOT_FIELDS=$(printf '%s' "$HOOK_STDIN" | (cd "$_BOOT_PLUGIN_ROOT" && PYTHONPATH="$_BOOT_PLUGIN_ROOT" python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    d = {}
+sid, cwd, src = (str(d.get(k) or "") for k in ("session_id", "cwd", "source"))
+print(sid); print(cwd); print(src)
+sys.stdout.flush()
+# The gate module first: importing hook_common puts the tree of an inherited
+# BRAIN_SERVER_DIR on sys.path, and servers must come from this plugin.
+try:
+    from servers.brain_gate import hook_allows, notice
+    gate_import_error = None
+except Exception as e:
+    gate_import_error = e
+try:
+    sys.path.insert(0, "hooks/scripts")
+    from hook_common import daemon_unreachable_here, REMOTE_HOOK_NOTICE
+    remote = daemon_unreachable_here()
+except Exception as e:
+    sys.stderr.write("[brain-boot] remote-machine check failed (%s) — booting\n" % e)
+    remote = False
+if remote:
+    sys.stderr.write("[brain-boot] no route to the brain daemon from this machine — no boot; hooks stay silent this session\n")
+    if src not in ("resume", "compact"):
+        print(REMOTE_HOOK_NOTICE)
+    sys.exit(3)
+try:
+    if gate_import_error is not None:
+        raise gate_import_error
+    verdict = hook_allows(cwd, sid)
+except Exception as e:
+    sys.stderr.write("[brain-boot] gate check failed (%s) — booting ungated\n" % e)
+    sys.exit(0)
+if not verdict.run:
+    sys.stderr.write("[brain-boot] gated (%s) — no boot context; hooks stay silent this session\n" % verdict.reason)
+    # The notice is for the operator, once: a resume or compaction re-fires
+    # SessionStart inside the same conversation and must not re-announce it.
+    # A failure in the notice itself stays a gated boot — exit 3 regardless.
+    if src not in ("resume", "compact"):
+        try:
+            print(notice(verdict))
+        except Exception as e:
+            sys.stderr.write("[brain-boot] gate notice failed (%s)\n" % e)
+    sys.exit(3)
+'))
+if [ $? -eq 3 ]; then
+  printf '%s\n' "$_BOOT_FIELDS" | sed -n '4,$p'
+  exit 0
+fi
+BRAIN_HOOK_SESSION_ID=$(printf '%s\n' "$_BOOT_FIELDS" | sed -n 1p)
+BRAIN_HOOK_CWD=$(printf '%s\n' "$_BOOT_FIELDS" | sed -n 2p)
+BRAIN_HOOK_SOURCE=$(printf '%s\n' "$_BOOT_FIELDS" | sed -n 3p)
+export BRAIN_HOOK_SESSION_ID BRAIN_HOOK_CWD
 
 # ── Resolve ANTHROPIC_API_KEY from canonical config location ──
 # Mechanism owned by api-key-env.sh (shared with brain-env.sh, which cannot be
@@ -126,7 +194,6 @@ fi
 # exit. The key resolution + mirror above already ran (pure shell). The MCP
 # launcher waits on the sentinel and connects in-session when the bootstrap
 # is quick; otherwise the next session lands on the ~8ms fast path.
-_BOOT_PLUGIN_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$(dirname "$0")/runtime-state.sh"
 if ! brain_runtime_installed "$_BOOT_PLUGIN_ROOT"; then
   # Chain the full first-run provisioning after the bootstrap, in order:
@@ -364,7 +431,6 @@ Searched locations:
   - \$BRAIN_DB_DIR env var (not set)
   - $_CFG_FILE/env BRAIN_DB_DIR= (not set)
   - $_XDG_FRESH/ (standard — not found, create failed)
-  - /sessions/*/mnt/AgentsContext/brain/ (Cowork — not found)
   - \$CLAUDE_PLUGIN_DATA/brain/ ($([ -n "$CLAUDE_PLUGIN_DATA" ] && echo "not found at $CLAUDE_PLUGIN_DATA/brain" || echo "\$CLAUDE_PLUGIN_DATA not set"))
   - \$HOME/AgentsContext/brain/ (not found, legacy)
 

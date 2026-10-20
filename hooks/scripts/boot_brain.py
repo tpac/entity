@@ -23,7 +23,7 @@ def _boot_via_daemon():
 
     New-vs-resume is decided by the daemon from the SESSION OBJECT
     (ctx.boot_time), not a global `last_booted_session` brain_meta key. That
-    global guard was last-writer-wins across parallel streams: with multiple live
+    global guard was last-writer-wins across parallel sessions: with multiple live
     sessions, every session but the most-recent booter failed the check, so its
     resume was treated as a fresh boot and the daemon zeroed its accumulated
     session state (back when the Scribe cadence was a stored counter, this is what
@@ -128,5 +128,7 @@ def _surface_unsurfaced_errors():
         print("[brain-boot] error-surfacing failed: %s" % e, file=sys.stderr)
 
 
-run_hook("boot_brain", main)
+# gated=False: boot-brain.sh already asked the gate before any of its shell
+# work and exited when refused — this process only exists for an open gate.
+run_hook("boot_brain", main, gated=False)
 _surface_unsurfaced_errors()

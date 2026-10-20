@@ -168,8 +168,8 @@ def _touched_trace(stop, **keys):
 
 
 class _Brain:
-    """Serves the doors the lived timeline pulls: recall_episodes,
-    query_traces (gather), and naked title lookups."""
+    """Serves the doors the lived timeline knocks on: query_traces (gather)
+    and naked title lookups. The turns come from _window."""
     def __init__(self, episodes, surface=(), encode=(), touched=(), titles=None):
         self._episodes = list(episodes)
         self._surface, self._encode, self._touched = \
@@ -184,10 +184,9 @@ class _Brain:
             return {i: {'title': self._titles[i]}
                     for i in ids if i in self._titles}
 
-    def recall_episodes(self, **kw):
-        rts = kw.get('ref_type') or []
-        eps = [e for e in self._episodes if e.get('ref_type') in rts]
-        return {'episodes': eps}
+    def speaker_for(self, session_id, ref_type):
+        # An install that declares no counterpart: no speaker is named.
+        return ''
 
     def query_traces(self, **kw):
         rt = kw.get('ref_type')
@@ -216,15 +215,19 @@ def _two_turn_eps(covered_body='covered turn text', tail_body='tail turn text'):
     ]
 
 
-_TWO_MSGS = [{'role': 'user'} for _ in range(2)]
+def _window(eps):
+    """The episodes grouped into the encoder's window, oldest first."""
+    from servers.trace_contract import group_turns
+    return group_turns(sorted(eps, key=lambda e: e['created_at']))
 
 
-def _render(view_policy, eps=None, now=None, **brain_kw):
+def _render(view_policy, eps=None, now=None, cataloged_ids=None, **brain_kw):
     brain_kw.setdefault('encode', [_encode_trace(6, ['nodeCCCC3333'], [],
                                                  tid='run6')])
     brain = _Brain(eps if eps is not None else _two_turn_eps(), **brain_kw)
-    return _render_lived_sequence_timeline(brain, 'sess', _TWO_MSGS,
-                                           view_policy=view_policy, now=now)
+    return _render_lived_sequence_timeline(brain, 'sess', _window(brain._episodes),
+                                           view_policy=view_policy, now=now,
+                                           cataloged_ids=cataloged_ids)
 
 
 def test_policy_off_is_legacy_render():
@@ -324,20 +327,20 @@ def test_policy_on_provenance_verb_split():
                               looked_up=['nodeFFFF6666', 'nodeDDDD4444'],
                               archived=['nodeEEEE5555'])]
     titles = {'nodeAAAA1111': 'fresh insight', 'nodeDDDD4444': 'looked up',
-              'nodeFFFF6666': 'search hit'}
-    on = _render(True, touched=touched, titles=titles)
+              'nodeFFFF6666': 'search hit', 'nodeCCCC3333': 'prior run'}
+    cataloged = {'nodeAAAA1111', 'nodeDDDD4444', 'nodeCCCC3333'}
+    on = _render(True, touched=touched, titles=titles, cataloged_ids=cataloged)
     t5 = on.split('<turn n="6"')[1].split('</turn>')[0]
     t6 = on.split('<turn n="7"')[1].split('</turn>')[0]
     # the canonical node_ref token under the policy — identical to the shape
-    # the catalog header, the edge lines and the ⚠ blocks use
-    # write verbs carry the id alone — the body is a catalog entry above
+    # the catalog header, the edge lines and the ⚠ blocks use; a cataloged
+    # node is named by its id alone, its body is a catalog entry above
     assert 'created(me): (id:nodeAAAA)' in t6
     assert 'revised(me): (id:nodeBBBB)' in t6            # no title → id alone
-    # recalled KEEPS its titles: only 43% of recalled ids have a catalog
-    # entry, so a bare id there is a reference with no body anywhere
-    # recalled(me) merges by-id reads with search results, deduped
-    assert ('recalled(me): "looked up" (id:nodeDDDD) "search hit" (id:nodeFFFF)'
-            in t6)
+    # recalled(me) = read by id; searched(me) = search results minus what I
+    # also read by id — nodeDDDD was both, so it shows once, as a read
+    assert 'recalled(me): (id:nodeDDDD)' in t6
+    assert 'searched(me): "search hit" (id:nodeFFFF)' in t6   # not cataloged
     assert t6.count('id:nodeDDDD') == 1
     assert 'archived(me): (id:nodeEEEE)' in t6
     # run attribution speaks turn coordinates (run6's post-increment stop =
@@ -350,7 +353,44 @@ def test_policy_on_provenance_verb_split():
     assert 'encoded(me): id:nodeAAAA «fresh insight»' in off
     assert 'encoded(S1S): id:nodeCCCC' in off
     assert 'created(me)' not in off and 'recalled(me)' not in off
+    assert 'searched(me)' not in off
     assert 'nodeFFFF' not in off
+
+
+def test_policy_on_provenance_title_iff_no_catalog_entry():
+    # One rule for every verb: a ref names a cataloged node by id alone and
+    # any other node by its title — whatever the verb.
+    touched = [_touched_trace(6, created=['nodeAAAA1111'],
+                              recalled=['nodeDDDD4444'],
+                              looked_up=['nodeFFFF6666', 'nodeGGGG7777'])]
+    surface = [{'id': 'sr6', 'chain_id': 's1r-%s-6' % SHORT,
+                'ref_id': '["nodeHHHH8888", "nodeIIII9999"]'}]
+    titles = {'nodeAAAA1111': 'fresh insight', 'nodeDDDD4444': 'community read',
+              'nodeFFFF6666': 'search hit', 'nodeGGGG7777': 'search in catalog',
+              'nodeHHHH8888': 'surfaced in catalog',
+              'nodeIIII9999': 'surfaced elsewhere', 'nodeCCCC3333': 'prior run'}
+    titles['nodeJJJJ0000'] = 'absorbed since'
+    cataloged = {'nodeGGGG7777', 'nodeHHHH8888', 'nodeCCCC3333'}
+    # a prior run's write the catalog no longer carries (absorbed, archived)
+    encode = [_encode_trace(6, ['nodeCCCC3333', 'nodeJJJJ0000'], [], tid='run6')]
+    on = _render(True, touched=touched, surface=surface, titles=titles,
+                 cataloged_ids=cataloged, encode=encode)
+    t5 = on.split('<turn n="6"')[1].split('</turn>')[0]
+    t6 = on.split('<turn n="7"')[1].split('</turn>')[0]
+    assert ('surfaced: (id:nodeHHHH) "surfaced elsewhere" (id:nodeIIII)'
+            in t6)
+    assert 'created(me): "fresh insight" (id:nodeAAAA)' in t6
+    assert 'recalled(me): "community read" (id:nodeDDDD)' in t6
+    assert ('searched(me): "search hit" (id:nodeFFFF) (id:nodeGGGG)'
+            in t6)
+    assert ('encoded(me, turn 6): (id:nodeCCCC) "absorbed since" (id:nodeJJJJ)'
+            in t5)
+    # no catalog id set → nothing counts as cataloged: every ref keeps its
+    # title, so a ref can never point at a body the prompt does not carry
+    bare = _render(True, touched=touched, surface=surface, titles=titles)
+    t6b = bare.split('<turn n="7"')[1].split('</turn>')[0]
+    assert '"surfaced in catalog" (id:nodeHHHH)' in t6b
+    assert '"search in catalog" (id:nodeGGGG)' in t6b
 
 
 def test_policy_on_turn_age_and_now_stamp():
@@ -639,8 +679,8 @@ def test_hidden_tools_and_split_stay_in_sync_with_substrate():
     from servers.scales.s1.trace_links import nodes_for_traces
     from servers.daemon_server import BrainDaemon
     link = nodes_for_traces([], [], [{'id': 'x', 'chain_id': 's0-a-1'}])['x']
-    for _label, keys, _titles in PROVENANCE_SPLIT:
-        for key in keys:
+    for _label, keys, minus in PROVENANCE_SPLIT:
+        for key in keys + minus:
             assert key in link
     non_full = DROPPED_ACTION_TOOLS | STUBBED_ACTION_TOOLS
     assert not {'connect', 'disconnect', 'revise_edge'} & non_full

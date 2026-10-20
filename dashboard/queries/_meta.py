@@ -13,7 +13,7 @@ import json
 # The S0 session stamp — mirrors trace_contract.S0_SESSION_STAMP_FIELDS (the
 # dashboard may not import servers.*; tests/test_s0_session_stamp.py holds the
 # two literals in step). Which model produced the turn and which host runtime
-# the stream rides on; per-turn on S0 rows, latest on the session row.
+# the session rides on; per-turn on S0 rows, latest on the session row.
 S0_SESSION_STAMP_FIELDS = ('model', 'host')
 
 # `ref_id` of a surface_selected K row that picked nothing (the surfacer

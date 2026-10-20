@@ -1,5 +1,5 @@
 // ===========================================================================
-// lib/sessions.js — the session registry: one owner for "who is this stream".
+// lib/sessions.js — the session registry: one owner for "who is this session".
 // ---------------------------------------------------------------------------
 // A session_id is a 36-char UUID. Nothing in the UI should ever show one raw,
 // and nothing should re-derive a label for one. This module owns:
@@ -7,17 +7,19 @@
 //   • the registry — /api/sessions (persisted env: worktree/branch/project/cwd)
 //     merged with /api/self-presence (who is LIVE right now, plus their arc)
 //   • the label     — sessionLabel(id) → the readable handle
+//   • the short     — sessionShort(id) → the hex a session is named by when
+//     it has no handle, the same short its chain ids and log lines carry
 //   • the hover     — sessionTooltip(id) → everything needed to FIND the thing
-//   • the color     — sessionColor(id) → a stable hue per stream, so multiple
-//     live streams stay distinguishable in the feed AND in the galaxy
+//   • the color     — sessionColor(id) → a stable hue per session, so multiple
+//     live sessions stay distinguishable in the feed AND in the galaxy
 //   • the chip      — sessionChip(id) → the rendered element
 //
-// The color is the part that earns its place with multiple live streams: with
-// three streams interleaving in one chronological feed, the name alone makes
+// The color is the part that earns its place with multiple live sessions: with
+// three sessions interleaving in one chronological feed, the name alone makes
 // you read every row to know who's talking. A consistent hue lets you see it.
 //
-// Hue assignment is a hash of the session id, NOT arrival order — so a stream's
-// color survives a reload and matches across the feed, the stream rail, and the
+// Hue assignment is a hash of the session id, NOT arrival order — so a session's
+// color survives a reload and matches across the feed, the session rail, and the
 // graph's activation tint. Order-based assignment would recolor everything the
 // moment an older session aged out of the 7-day window.
 // ===========================================================================
@@ -26,19 +28,19 @@ import { api } from '/static/lib/api.js';
 import bus from '/static/lib/bus.js';
 import { el, relativeTime } from '/static/lib/dom.js';
 
-// Stream palette — distinguishable at chip size on the dark surface, and
+// Session palette — distinguishable at chip size on the dark surface, and
 // distinguishable from the graph's aspect hues (which are warmer/duller) so a
-// stream tint never reads as a memory kind.
+// session tint never reads as a memory kind.
 //
 // Exported as RGB triples too: the graph tints each activation wave by the
-// stream that caused it, and its sprites are built from raw channels. Both
-// forms come from this one list so a stream is literally the same color in the
+// session that caused it, and its sprites are built from raw channels. Both
+// forms come from this one list so a session is literally the same color in the
 // feed and in the galaxy.
-export const STREAM_RGB = [
+export const SESSION_RGB = [
   [126, 184, 255], [51, 255, 136], [255, 170, 51], [255, 102, 170],
   [69, 183, 209],  [196, 168, 240], [255, 204, 0],  [184, 255, 126],
 ];
-const STREAM_HUES = STREAM_RGB.map(([r, g, b]) => `rgb(${r}, ${g}, ${b})`);
+const SESSION_HUES = SESSION_RGB.map(([r, g, b]) => `rgb(${r}, ${g}, ${b})`);
 
 // session_id → record. Merged view; both sources write here.
 const _registry = new Map();
@@ -50,32 +52,36 @@ function _hash(s) {
   return (h >>> 0);
 }
 
-/** Palette slot for a stream — the shared index behind both color forms. */
+/** Palette slot for a session — the shared index behind both color forms. */
 export function sessionHueIndex(id) {
-  return id ? (_hash(id) % STREAM_RGB.length) : -1;
+  return id ? (_hash(id) % SESSION_RGB.length) : -1;
 }
 
-/** Stable hue for a stream. Same id → same color, forever. */
+/** Stable hue for a session. Same id → same color, forever. */
 export function sessionColor(id) {
   if (!id) return 'var(--text-muted)';
-  return STREAM_HUES[sessionHueIndex(id)];
+  return SESSION_HUES[sessionHueIndex(id)];
 }
 
 /** The record we know for a session — always an object, never undefined, so
  *  callers can read fields without guards on a session we've never seen. */
 export function sessionInfo(id) {
-  return _registry.get(id) || { id, short: (id || '').slice(0, 8) };
+  return _registry.get(id) || { id };
+}
+
+/** The session's short id — the dashboard's one copy of
+ *  trace_contract.session_short, which it cannot import: the last 12
+ *  characters of the id with its hyphens removed. Its chain ids and log lines
+ *  carry the same short. tests/test_dashboard_disconnection.py pins it. */
+export function sessionShort(id) {
+  return (id || '').replace(/-/g, '').slice(-12);
 }
 
 // Handles that more than one known session claims. A worktree outlives a
-// session — resume it, or run two streams in it, and several session_ids share
+// session — resume it, or run two sessions in it, and several session_ids share
 // one handle. Rendered side by side in the rail that reads as a duplicate row,
-// and two activity cards from different streams look like the same stream.
-// Ambiguous handles get a four-char tail of their id appended; unique ones
-// stay clean. The TAIL, not the head: Codex task ids are UUIDv7, time-ordered,
-// so every session for weeks shares the leading chars and a head suffix
-// collapses concurrent streams into one label. The last chars are random
-// under both v4 and v7.
+// and two activity cards from different sessions look like the same session.
+// Ambiguous handles get the session short appended; unique ones stay clean.
 let _ambiguous = new Set();
 
 function _recomputeAmbiguous() {
@@ -87,25 +93,25 @@ function _recomputeAmbiguous() {
   _ambiguous = new Set([...counts.entries()].filter(([, n]) => n > 1).map(([h]) => h));
 }
 
-/** The display handle. Falls back through worktree → branch tail → hex.
+/** The display handle. Falls back through worktree → branch tail → short.
  *  Resolution lives server-side (queries/sessions._handle) so historical and
  *  live sessions agree; this is the client-side read of it, plus the
- *  disambiguating suffix when a handle is shared, and the hex fallback for ids
- *  the registry has never heard of. */
+ *  disambiguating short when a handle is shared, and the short alone for
+ *  sessions with no handle or that the registry has never heard of. */
 export function sessionLabel(id) {
   if (!id) return '';
   const rec = _registry.get(id);
   const handle = rec && rec.handle;
-  if (!handle) return id.slice(0, 8);
-  return _ambiguous.has(handle) ? handle + '·' + id.slice(-4) : handle;
+  if (!handle) return sessionShort(id);
+  return _ambiguous.has(handle) ? handle + '·' + sessionShort(id) : handle;
 }
 
-/** Everything needed to find this stream again, as a title= string.
+/** Everything needed to find this session again, as a title= string.
  *  Multi-line: browsers render \n in title attributes. */
 export function sessionTooltip(id) {
   const r = sessionInfo(id);
   const lines = [];
-  if (r.handle && r.handle !== r.short) lines.push(r.handle);
+  if (r.handle) lines.push(r.handle);
   if (r.handle && _ambiguous.has(r.handle)) {
     lines.push('(several sessions share this worktree — suffix disambiguates)');
   }
@@ -115,7 +121,7 @@ export function sessionTooltip(id) {
   if (r.branch) lines.push('branch: ' + r.branch);
   if (r.worktree) lines.push('worktree: ' + r.worktree);
   if (r.cwd) lines.push('cwd: ' + r.cwd.replace(/^\/Users\/[^/]+/, '~'));
-  // Latest model/host the stream rode on (per-turn values live on the traces).
+  // Latest model/host the session rode on (per-turn values live on the traces).
   if (r.model) lines.push('model: ' + r.model + (r.host ? ' (' + r.host + ')' : ''));
   if (r.turns) lines.push(r.turns + ' turns');
   if (r.events) lines.push(r.events + ' trace events');
@@ -139,7 +145,7 @@ export function sessionChip(id, { compact = false } = {}) {
   );
 }
 
-/** Live streams, newest-active first — the stream rail's data. */
+/** Live sessions, newest-active first — the session rail's data. */
 export function liveSessions() {
   return [..._registry.values()]
     .filter(r => r.live)
@@ -154,7 +160,7 @@ export function knownSessions() {
 
 function _upsert(id, fields) {
   if (!id) return;
-  const prior = _registry.get(id) || { id, short: id.slice(0, 8) };
+  const prior = _registry.get(id) || { id };
   _registry.set(id, { ...prior, ...fields });
 }
 
@@ -162,16 +168,16 @@ function _upsert(id, fields) {
  *
  * Presence is authoritative for liveness + arc (only the daemon knows who is
  * breathing); /api/sessions is authoritative for the persisted env and trace
- * counts (it covers sessions that have since ended). A stream that is live but
+ * counts (it covers sessions that have since ended). A session that is live but
  * has no trace rows yet still lands in the registry from presence alone — a
- * freshly-booted stream must be visible before it has done anything. */
+ * freshly-booted session must be visible before it has done anything. */
 export async function refresh() {
   let changed = false;
   try {
     const rows = await api.sessions();
     for (const s of (rows || [])) {
       _upsert(s.id, {
-        short: s.short, handle: s.handle, first: s.first, last: s.last,
+        handle: s.handle, first: s.first, last: s.last,
         events: s.events, branch: s.branch, worktree: s.worktree,
         project: s.project, cwd: s.cwd, turns: s.turns,
         model: s.model, host: s.host,
@@ -183,17 +189,17 @@ export async function refresh() {
   try {
     const p = await api.selfPresence({ limit: 20 });
     const liveIds = new Set();
-    for (const s of (p.streams || [])) {
+    for (const s of (p.sessions || [])) {
       const id = s.session_id || s.id || '';
       if (!id) continue;
       liveIds.add(id);
       const prior = sessionInfo(id);
-      // Presence carries branch/worktree/cwd too, so a stream with no trace
+      // Presence carries branch/worktree/cwd too, so a session with no trace
       // rows yet still gets a real handle. Never let a blank from presence
       // erase what /api/sessions established — hence the `|| prior` chain on
-      // every field, and the 'unknown' guard on branch (presence's literal
-      // for "detection failed").
-      const branch = (s.branch && s.branch !== 'unknown') ? s.branch : (prior.branch || '');
+      // every field, and the 'unknown' guard on branch (the persisted literal
+      // for "detection failed", which /api/sessions passes through too).
+      const branch = [s.branch, prior.branch].find(b => b && b !== 'unknown') || '';
       const worktree = s.worktree || prior.worktree || '';
       _upsert(id, {
         live: true, state: s.state || '',
@@ -204,18 +210,18 @@ export async function refresh() {
         model: s.model || prior.model || '',
         host: s.host || prior.host || '',
         // Same precedence the server's _handle uses: worktree, then the
-        // branch tail with the shared `claude/` namespace dropped, then hex.
+        // branch tail with the shared `claude/` namespace dropped, else none
+        // (sessionLabel falls back to the short).
         handle: prior.handle
                 || worktree
-                || (branch ? (branch.includes('/') ? branch.slice(branch.indexOf('/') + 1) : branch) : '')
-                || s.short || id.slice(0, 8),
+                || (branch ? (branch.includes('/') ? branch.slice(branch.indexOf('/') + 1) : branch) : ''),
         last: s.updated_at || prior.last || '',
         started: s.session_started_at || prior.started || '',
         inbox: s.pending_inbox_count || 0,
       });
       changed = true;
     }
-    // Demote streams that dropped off the roster — otherwise a dead stream
+    // Demote sessions that dropped off the roster — otherwise a dead session
     // keeps its live dot for the page's lifetime.
     for (const [id, rec] of _registry) {
       if (rec.live && !liveIds.has(id)) _registry.set(id, { ...rec, live: false });

@@ -55,9 +55,24 @@ class TestCapPrimitives(unittest.TestCase):
         self.assertEqual(cap_text_loud('abc', 3), 'abc')
         self.assertEqual(cap_text_loud(None, 3), '')
 
+    def test_cap_text_loud_bare_marker(self):
+        # A hard cut at the limit, marked without a count.
+        self.assertEqual(cap_text_loud('abcdef', 3, marker='…'), 'abc …')
+        self.assertTrue(looks_truncated(cap_text_loud('abcdef', 3, marker='…')))
+
     def test_cap_list_loud_stays_a_list(self):
         self.assertEqual(cap_list_loud([1, 2, 3], 2), [1, 2, '…[+1 more truncated]'])
         self.assertEqual(cap_list_loud([1], 2), [1])
+
+
+class TestBoundaryCutBareMarker(unittest.TestCase):
+    """A marker without %d is appended as is — the tool moment's bare '…'."""
+
+    def test_bare_marker_names_no_count(self):
+        out = cap_text_at_boundary('Sentence one. ' * 40, 300, marker='…')
+        self.assertTrue(out.endswith('. …'))
+        self.assertNotIn('+', out)
+        self.assertTrue(looks_truncated(out))
 
 
 class TestLooksTruncated(unittest.TestCase):

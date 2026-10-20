@@ -1,7 +1,7 @@
 """Self-channel signal — the directed message (Phase 2a, pull courier).
 
-The "hearing" half of self<->self: one stream sends a message addressed to
-another live stream (self:<sid>) or to self:broadcast; the recipient consumes
+The "hearing" half of self<->self: one session sends a message addressed to
+another live session (self:<sid>) or to self:broadcast; the recipient consumes
 it once. Presence is the passive look; a signal is a deliberate reach — Anchor
 authors it, unlike the encoder-written letter.
 
@@ -25,6 +25,7 @@ import json
 import uuid
 
 from servers.clock import iso_now, iso_after
+from servers.trace_contract import session_short
 from servers.channels.self_channel import self_contract
 
 
@@ -51,15 +52,20 @@ def _resolve_ttl_hours(brain, address):
 def send(brain, from_session, address, body, refs=None):
     """Place a directed/broadcast self-message in the courier. Returns its record.
 
-    Stores the body and refs IN FULL — no truncation here. Per the self-channel
-    truncation contract (self_contract), the SINGLE truncation point is delivery
-    render (render_received_block), and it is loud; storage keeps everything so
-    the dashboard always shows the message untruncated. The only guard is a
-    non-empty body. A message addressed to the sender's own id carries
+    The courier's one write door, for every sender (self_send, Thalamus's live
+    route). Per the self-channel size contract (self_contract), a body over
+    SIGNAL_BODY_MAX is refused here, loudly, and nothing is ever cut later:
+    what is accepted is stored and delivered whole. An empty body is refused
+    too. A message addressed to the sender's own id carries
     `note_to_self: True`, so a mis-addressed reply is visible at send time."""
     body = (body or '').strip()
     if not body:
         raise ValueError('self.signal.send: empty body')
+    if len(body) > self_contract.SIGNAL_BODY_MAX:
+        raise ValueError(
+            'self.signal.send: the message is {:,} characters and the limit is '
+            '{:,}. Shorten it, or put the detail in a file or a brain node and '
+            'send its path or id.'.format(len(body), self_contract.SIGNAL_BODY_MAX))
     refs_json = json.dumps(list(refs or []))
     mid = uuid.uuid4().hex[:12]
     created_at = iso_now()
@@ -79,14 +85,14 @@ def send(brain, from_session, address, body, refs=None):
         brain.logs_conn_w.commit()
     rec = {'id': mid, 'address': address,
            'created_at': created_at, 'expires_at': expires_at}
-    if from_session and address == self_contract.address_for_stream(from_session):
+    if from_session and address == self_contract.address_for_session(from_session):
         rec['note_to_self'] = True
     return rec
 
 
 def _recent_sender_ids(brain):
     """Distinct senders of still-unexpired courier messages — the pool that lets
-    you reply-by-short to a stream that messaged you even after it drops off the
+    you reply-by-short to a session that messaged you even after it drops off the
     live roster (its from_session is still in the courier). Read-only."""
     rows = brain.logs_conn.execute(
         'SELECT DISTINCT from_session FROM self_inflight '
@@ -95,75 +101,99 @@ def _recent_sender_ids(brain):
     return [r[0] for r in rows]
 
 
-def resolve_stream(brain, ref, exclude_session=''):
-    """Resolve a stream REFERENCE to its canonical FULL session id — the single
-    resolver every "name a stream" caller routes through (self_send's target,
-    self_peek, and any future fuzzy reference). Returns (full_id, None) on a unique
+def resolve_session(brain, ref, exclude_session='', pool='live'):
+    """Resolve a session REFERENCE to its canonical FULL session id — the single
+    resolver every "name a session" caller routes through (self_send's target,
+    self_peek, remind's for_whom, and the session filters of query_traces and
+    recall_episodes). Returns (full_id, None) on a unique
     match, (None, error) on ambiguity / no match. Errors name FULL ids so "use the
     full session id" is actionable.
 
-    A full session UUID is canonical, honored directly (works even when the target
-    isn't in the live roster this instant — it drains within TTL). Anything shorter
-    is an id-PREFIX (the 8-char short you see in a message) matched against the live
-    set: live roster ∪ recent courier senders. The roster alone misses a stream
-    gone dormant since it messaged you, but its from_session lingers in the courier,
-    so you can always reply-by-short to someone who reached you.
+    A session is named one of two ways: its full session UUID, honored directly
+    (works even when the target isn't in the live roster this instant — it drains
+    within TTL), or its session short (trace_contract.session_short), the one form
+    every surface shows, matched EXACTLY — never a start, a partial tail or a
+    guess, so a stale or mistyped reference fails loudly rather than landing on
+    another session (Codex ids open with a timestamp, so same-minute chats share
+    their start). Two distinct ids sharing a short (vanishingly rare) are refused
+    as ambiguous.
 
-    Candidates are filtered to is_session_id-shaped ids — only a canonical full
-    UUID is a resolvable stream. That filter (not a bare `if s`) is the structural
-    guard against id contamination: a short / non-UUID `from_session` that leaked
-    into the courier (db79e0c1 — now stopped at the write boundary by sender_id)
-    simply never enters the pool, so it can't read as a phantom second match (the
-    '37a32ee9 matches 2' bug) NOR silently merge into a different stream. No full
-    UUID is a prefix of another (same length), so every surviving multi-match is
-    GENUINE ambiguity; dict.fromkeys still collapses the same id arriving from both
-    the roster AND the courier. `exclude_session` drops that stream from the
-    prefix pool — self_peek passes the caller, so a prefix never resolves a peek
-    to the stream doing the looking.
+    `pool` is where a short is looked for.
 
-    NOT handled here: 'broadcast' (a delivery address, not a stream — resolve_to
-    owns that). Fuzzy refs (a partial worktree/branch label) are the natural next
-    match dimension — the candidate pool already carries those via the rich peek —
-    and slot in right where the prefix match is, with the same ambiguity contract."""
+    'live' — addressing: a message or a reminder aims at a session that is here.
+    The pool is the live roster ∪ recent courier senders. The roster alone misses
+    a session gone dormant since it messaged you, but its from_session lingers in
+    the courier, so you can always reply by short to someone who reached you.
+    Candidates are filtered to is_session_id-shaped ids. That filter (not a bare
+    `if s`) is the structural guard against id contamination: a short / non-UUID
+    `from_session` that leaked into the courier (db79e0c1 — now stopped at the
+    write boundary by sender_id) simply never enters the pool, so it can't read
+    as a phantom second match (the '37a32ee9 matches 2' bug) NOR silently merge
+    into a different session. dict.fromkeys collapses the same id arriving from
+    both the roster AND the courier. `exclude_session` drops that session from
+    the pool — self_peek passes the caller, so a short never resolves a peek to
+    the session doing the looking.
+
+    'history' — filtering: a trace filter may name any session ever recorded.
+    The pool is every stored session id, UUID or not: trace history keeps eval
+    and test sessions whose ids are not UUIDs, and trace headers show a short
+    for those too. A reference names a stored id exactly or by its short; one
+    that does both for different sessions is ambiguous like any other.
+
+    NOT handled here: 'broadcast' (a delivery address, not a session — resolve_to
+    owns that)."""
+    if pool not in ('live', 'history'):
+        raise ValueError("resolve_session: pool must be 'live' or 'history', got %r"
+                         % (pool,))
     ref = (ref or '').strip()
     if not ref:
-        return None, "empty stream reference"
+        return None, "empty session reference"
     if self_contract.is_session_id(ref):
         return ref, None
-    window = self_contract.ROSTER_LIVE_WINDOW_MIN + self_contract.ROSTER_LOST_GRACE_MIN
-    candidates = [r.get('session_id', '')
-                  for r in brain.present_streams(
-                      exclude_session=exclude_session, window_min=window, limit=50)]
-    candidates += _recent_sender_ids(brain)
-    matches = list(dict.fromkeys(
-        s for s in candidates
-        if self_contract.is_session_id(s) and s != exclude_session and s.startswith(ref)))
+    if pool == 'history':
+        matches = [s for s in brain.trace_session_ids()
+                   if s != exclude_session and (s == ref or session_short(s) == ref)]
+        kind = 'sessions in the trace history'
+        missing = ("no session in the trace history matches '%s' — use the short "
+                   "a trace header shows, or the session's full id." % ref)
+    else:
+        window = self_contract.ROSTER_LIVE_WINDOW_MIN + self_contract.ROSTER_LOST_GRACE_MIN
+        candidates = [r.get('session_id', '')
+                      for r in brain.present_sessions(
+                          exclude_session=exclude_session, window_min=window, limit=50)]
+        candidates += _recent_sender_ids(brain)
+        matches = list(dict.fromkeys(
+            s for s in candidates
+            if self_contract.is_session_id(s) and s != exclude_session
+            and session_short(s) == ref))
+        kind = 'live sessions'
+        missing = ("no live session matches '%s' — it may be dormant or lost. Use its "
+                   "full session id, or self_presence to see who's live." % ref)
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:
-        # GENUINE ambiguity — distinct full ids sharing this prefix. Name the FULL
-        # ids: the prefix is exactly what's ambiguous, so echoing it can't help.
-        return None, ("'%s' matches %d live streams (%s) — use the full session id "
-                      "to disambiguate" % (ref, len(matches), ", ".join(matches)))
-    return None, ("no live stream matches '%s' — it may be dormant or lost. Use its "
-                  "full session id, or self_presence to see who's live." % ref)
+        # Distinct ids sharing this reference. Name the FULL ids: the reference
+        # is exactly what's ambiguous, so echoing it can't help.
+        return None, ("'%s' matches %d %s (%s) — use the full session id "
+                      "to disambiguate" % (ref, len(matches), kind, ", ".join(matches)))
+    return None, missing
 
 
 def resolve_to(brain, to):
     """Resolve an MCP self_send `to` to a delivery ADDRESS, gracefully — returns
-    (address, error) with exactly one non-None. 'broadcast' is the only non-stream
-    target; every other form is a stream reference handed to resolve_stream (full
-    id / id-prefix) and wrapped as a directed address. The sender stays in the
-    candidate pool: a stream may address its own id (a note to itself)."""
+    (address, error) with exactly one non-None. 'broadcast' is the only non-session
+    target; every other form is a session reference handed to resolve_session (full
+    id or session short) and wrapped as a directed address. The sender stays in the
+    candidate pool: a session may address its own id (a note to itself)."""
     to = (to or '').strip()
     if not to:
         return None, "self_send: empty 'to'"
     if to == 'broadcast':
         return self_contract.ADDR_BROADCAST, None
-    full_id, error = resolve_stream(brain, to)
+    full_id, error = resolve_session(brain, to)
     if error:
         return None, "self_send: " + error
-    return self_contract.address_for_stream(full_id), None
+    return self_contract.address_for_session(full_id), None
 
 
 # The pending-inbox SELECT — the SINGLE source for drain (consume-once) and peek
@@ -185,7 +215,7 @@ _PENDING_INBOX_SQL = (
 def _pending_rows(conn, to_session, now):
     """Pending-inbox rows for `to_session` at time `now`, oldest first
     (id, from_session, body, created_at, own). Read-only; the single query
-    shared by drain_inbox and peek_inbox. `own` marks a note this stream sent
+    shared by drain_inbox and peek_inbox. `own` marks a note this session sent
     itself — decided here once, so every surface that shows a message (the Stop
     drain, the /watch poller) attributes it the same way."""
     directed, broadcast = self_contract.routes_at_turn(to_session)
@@ -198,7 +228,7 @@ def _pending_rows(conn, to_session, now):
 
 def _has_prior_delivery(conn, to_session, from_session):
     """True if `to_session` has ALREADY drained a message from `from_session`
-    (any time). Drives first-contact enrichment: the first message from a stream
+    (any time). Drives first-contact enrichment: the first message from a session
     carries its peek as intro, the rest stay lean. Read-only."""
     if not from_session:
         return False
@@ -208,47 +238,60 @@ def _has_prior_delivery(conn, to_session, from_session):
         (to_session, from_session)).fetchone() is not None
 
 
+def _pending_messages(conn, to_session, now):
+    """The pending inbox as delivery records, oldest first — what both drains
+    consume from. Read-only; the caller holds the write envelope and marks
+    what it consumes with _mark_delivered."""
+    out, seen = [], set()
+    for mid, from_session, body, created_at, own in _pending_rows(conn, to_session, now):
+        # First contact = no message from this sender delivered to me before,
+        # and none earlier in this batch. A note to self is your own words:
+        # no introduction.
+        first_contact = (not own and from_session not in seen
+                         and not _has_prior_delivery(conn, to_session, from_session))
+        if from_session:
+            seen.add(from_session)
+        short = self_contract.sender_short(from_session)
+        out.append({
+            'id': mid,
+            'from': short,
+            'from_full': from_session or '',
+            'body': body,
+            'created_at': created_at,
+            'first_contact': first_contact,
+            'own': own,
+            'rendered': self_contract.render_signal(body, short=short, own=own),
+        })
+    return out
+
+
+def _mark_delivered(conn, to_session, messages, now):
+    """Consume `messages` for `to_session` — the one write behind consume-once
+    (the self_delivered PK makes a repeat a no-op)."""
+    conn.executemany(
+        'INSERT OR IGNORE INTO self_delivered (message_id, to_session, delivered_at) '
+        'VALUES (?, ?, ?)', [(m['id'], to_session, now) for m in messages])
+
+
 def drain_inbox(brain, to_session):
     """Consume-once: deliver undelivered, unexpired messages addressed to this
-    stream (directed self:<id> + self:broadcast). Returns rendered messages,
+    session (directed self:<id> + self:broadcast). Returns all of them in full,
     oldest first. Marking-delivered is atomic vs concurrent drains (write_lock +
     the self_delivered PK)."""
     if not to_session:
         return []
     now = iso_now()
-    out = []
     with brain.logs_write_lock:
-        # Everything in this envelope runs on logs_conn_w — the first-contact
-        # check must see this transaction's own uncommitted inserts.
-        rows = _pending_rows(brain.logs_conn_w, to_session, now)
-        for mid, from_session, body, created_at, own in rows:
-            # First contact = no PRIOR delivered message from this sender to me.
-            # Checked BEFORE the insert below; within a multi-message batch the
-            # same-transaction insert makes the 2nd+ from one sender non-first.
-            # A note to self is your own words: no introduction.
-            first_contact = not own and not _has_prior_delivery(
-                brain.logs_conn_w, to_session, from_session)
-            brain.logs_conn_w.execute(
-                'INSERT OR IGNORE INTO self_delivered (message_id, to_session, delivered_at) '
-                'VALUES (?, ?, ?)', (mid, to_session, now))
-            short = (from_session or '')[:8]
-            out.append({
-                'id': mid,
-                'from': short,
-                'from_full': from_session or '',
-                'body': body,
-                'created_at': created_at,
-                'first_contact': first_contact,
-                'own': own,
-                'rendered': self_contract.render_signal(body, stream_short=short, own=own),
-            })
+        # Reads and the consume share logs_conn_w, one envelope.
+        out = _pending_messages(brain.logs_conn_w, to_session, now)
+        _mark_delivered(brain.logs_conn_w, to_session, out, now)
         brain.logs_conn_w.commit()
     return out
 
 
 def peek_inbox(brain, to_session):
     """Read-only twin of drain_inbox: return pending (undelivered, unexpired)
-    messages addressed to this stream WITHOUT consuming them.
+    messages addressed to this session WITHOUT consuming them.
 
     Shares the pending-inbox query with drain_inbox (_pending_rows) — same
     filter (directed + broadcast routes, unexpired, not your own broadcast, not
@@ -259,7 +302,7 @@ def peek_inbox(brain, to_session):
         return []
     now = iso_now()
     rows = _pending_rows(brain.logs_conn, to_session, now)
-    return [{'id': mid, 'from': (from_session or '')[:8],
+    return [{'id': mid, 'from': self_contract.sender_short(from_session),
              'body': body, 'created_at': created_at, 'own': own}
             for mid, from_session, body, created_at, own in rows]
 
@@ -275,9 +318,11 @@ def pending_count(brain, to_session):
 
 
 def drain_and_render(brain, to_session):
-    """Delivery primitive — drain this stream's inbox and render the
-    pending messages into one budgeted block. Returns (block, n_drained), or
-    ("", 0) when empty. Consume-once is inherited from drain_inbox.
+    """Delivery primitive — render this session's pending messages into one
+    budgeted block and consume exactly the ones it shows. Returns
+    (block, n_shown), or ("", 0) when empty. A message past the block budget
+    is not consumed: it stays in the inbox, and the block's tail tells the
+    reader to call self_inbox for it (or it arrives at the next Stop).
 
     The only caller is the courier's render adapter in channels/delivery.py,
     and only at the forcing Stop moment (`decision:block` — a turn cannot end
@@ -285,19 +330,27 @@ def drain_and_render(brain, to_session):
     `serves()` keeps this drain off every passive moment, where consume-once
     against a channel that can be missed would lose messages. The delivery
     leg owns tracing (it holds the chain)."""
-    pending = drain_inbox(brain, to_session)
-    if not pending:
+    if not to_session:
         return "", 0
-    # First contact from a stream → attach its peek so the intro carries context
-    # (who, since when, what they're working on). Lazy import: presence imports
-    # signal at module load, so importing presence here (call time, not load time)
-    # keeps the enrichment in the delivery layer without a top-level import cycle.
-    if any(m.get('first_contact') for m in pending):
-        from servers.channels.self_channel import presence
-        for m in pending:
-            if m.get('first_contact') and m.get('from_full'):
-                m['sender_peek'] = presence.peek(brain, m['from_full'])
-    return self_contract.render_received_block(pending), len(pending)
+    now = iso_now()
+    with brain.logs_write_lock:
+        pending = _pending_messages(brain.logs_conn_w, to_session, now)
+        if not pending:
+            return "", 0
+        # First contact from a session → attach its peek so the intro carries
+        # context (who, since when, what they're working on). Lazy import:
+        # presence imports signal at module load, so importing presence here
+        # (call time, not load time) keeps the enrichment in the delivery layer
+        # without a top-level import cycle.
+        if any(m.get('first_contact') for m in pending):
+            from servers.channels.self_channel import presence
+            for m in pending:
+                if m.get('first_contact') and m.get('from_full'):
+                    m['sender_peek'] = presence.peek(brain, m['from_full'])
+        block, shown = self_contract.render_received_block(pending)
+        _mark_delivered(brain.logs_conn_w, to_session, pending[:shown], now)
+        brain.logs_conn_w.commit()
+    return block, shown
 
 
 def reap_expired(brain):
@@ -320,14 +373,14 @@ def reap_expired(brain):
 
 
 def outbox(brain, from_session, limit=20):
-    """Delivery status of messages THIS stream SENT — the sender-side view that
-    until now only the dashboard had. Per recent in-flight message: which streams
+    """Delivery status of messages THIS session SENT — the sender-side view that
+    until now only the dashboard had. Per recent in-flight message: which sessions
     have drained (read) it and when, and — for a DIRECTED send — whether the named
     target is still pending. Closes the gap a sender hit when a reply never came:
     it tells "delivered, not acted on" apart from "never delivered". Read-only —
     pure SELECT, no write_lock.
 
-    Broadcast has no fixed recipient set (any live stream may yet drain it), so
+    Broadcast has no fixed recipient set (any live session may yet drain it), so
     `pending` is reported only for a directed address; broadcasts just list who has
     drained so far."""
     if not from_session:
@@ -348,13 +401,13 @@ def outbox(brain, from_session, limit=20):
             'address': address,
             'created_at': created_at,
             'preview': (body or '')[:120] + (' …' if len(body or '') > 120 else ''),
-            'delivered_to': [{'to': (ts or '')[:8], 'at': at} for ts, at in delivered],
+            'delivered_to': [{'to': session_short(ts), 'at': at} for ts, at in delivered],
         }
         target = address.split(':', 1)[1] if ':' in address else address
         if target == 'broadcast':
             rec['broadcast'] = True
         else:
-            rec['target'] = target[:8]
+            rec['target'] = session_short(target)
             rec['pending'] = not any((ts or '') == target for ts, _ in delivered)
         out.append(rec)
     return {'messages': out}

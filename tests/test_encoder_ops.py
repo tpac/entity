@@ -289,6 +289,90 @@ def test_write_answerer_refuses_like_production_and_patches_what_lands():
     assert bare['current'] == {'content': 'z are seeded.'}   # the running view
 
 
+class _HistoryCopy:
+    """A copy that has moved on since a capture: get_node (absorbs followed
+    unless follow_absorbed=False) and the node_revised / node_archived traces
+    the as-of view rolls back through."""
+    def __init__(self, nodes, absorbed=None, events=None):
+        self.nodes, self.absorbed, self.events = nodes, absorbed or {}, events or []
+
+    def get_node(self, ids, follow_absorbed=True):
+        import copy
+        out = {}
+        for i in ids:
+            j = self.absorbed.get(i, i) if follow_absorbed else i
+            if j in self.nodes:
+                out[i + '0' * 24] = copy.deepcopy(self.nodes[j])
+        return out
+
+    def query_traces(self, ref_type, ref_id, hours=None, limit=100):
+        return {'events': [e for e in self.events
+                           if e['ref_type'] == ref_type and e['ref_id'] == ref_id]}
+
+
+def test_write_answerer_as_of_answers_the_node_the_capture_showed():
+    """The frozen arm's answers come from each node as it stood at the
+    capture: a revision after it is rolled back (the payload's patch lands,
+    a miss never quotes the later text), an absorb after it answers with the
+    node's own record, and a node created after it is not checked; a node
+    already archived at the capture is absent too."""
+    h = _harness()
+    as_of = '2026-10-09T18:48:00+00:00'
+    later = '2026-10-09T23:34:00+00:00'
+    copy_ = _HistoryCopy(
+        {'a7b8a9c2': {'id': 'a7b8a9c2', 'created_at': '2026-10-01T00:00:00+00:00',
+                      'title': 'REPLACED, shipped', 'content': 'resolved and deployed'},
+         '545a96dd': {'id': '545a96dd', 'created_at': '2026-10-01T00:00:00+00:00',
+                      'archived': 1, 'title': 'own',
+                      'content': 'the absorbed node said this'},
+         'c3c3c3c3': {'id': 'c3c3c3c3', 'created_at': '2026-09-01T00:00:00+00:00',
+                      'archived': 1, 'title': 'archived long before', 'content': 'old'},
+         'f0f0f0f0': {'id': 'f0f0f0f0', 'created_at': '2026-10-01T00:00:00+00:00',
+                      'title': 'survivor', 'content': 'the survivor says that'},
+         'b1b1b1b1': {'id': 'b1b1b1b1', 'created_at': '2026-10-10T00:00:00+00:00',
+                      'title': 'born after', 'content': 'x'}},
+        absorbed={'545a96dd': 'f0f0f0f0'},
+        events=[{'ref_type': 'node_revised', 'ref_id': 'a7b8a9c2', 'created_at': later,
+                 'metadata': {'deltas': [
+                     {'field': 'content', 'old': 'redesign running, 6 questions',
+                      'new': 'resolved and deployed'},
+                     {'field': 'title', 'old': 'redesign running', 'new': 'REPLACED, shipped'}]}},
+                {'ref_type': 'node_archived', 'ref_id': '545a96dd', 'created_at': later,
+                 'metadata': {'deltas': [{'field': 'archived', 'old': 0, 'new': 1}]}}])
+    then = h.stored_nodes(copy_, ['a7b8a9c2', '545a96dd', 'b1b1b1b1', 'c3c3c3c3'],
+                          as_of)
+    assert then['a7b8a9c2']['content'] == 'redesign running, 6 questions'
+    assert then['a7b8a9c2']['title'] == 'redesign running'
+    assert then['545a96dd']['content'] == 'the absorbed node said this'
+    assert not then['545a96dd']['archived']          # archived after the capture
+    assert 'b1b1b1b1' not in then and 'c3c3c3c3' not in then
+    patch = [{'op': 'revise', 'node_id': 'a7b8a9c2', 'reason': 'r',
+              'content': {'old': '6 questions', 'new': '6 answers'}},
+             {'op': 'revise', 'node_id': '545a96dd', 'reason': 'r',
+              'content': {'old': 'absorbed node said', 'new': 'absorbed node says'}},
+             {'op': 'revise', 'node_id': 'b1b1b1b1', 'reason': 'r',
+              'content': {'old': 'not checked', 'new': 'y'}}]
+    assert h.write_answerer(copy_, as_of)('brain_batch', {'operations': patch})[1] == []
+    # without as_of the copy as it is answers: every patch misses, the
+    # later-born node's included (the copy holds it)
+    assert h.write_answerer(copy_)('brain_batch', {'operations': patch})[1] == [0, 1, 2]
+    # a miss quotes the node as the capture showed it, never the later text
+    miss = [{'op': 'revise', 'node_id': 'a7b8a9c2', 'reason': 'r',
+             'content': {'old': 'not in either version', 'new': 'z'}}]
+    result, refused = h.write_answerer(copy_, as_of)('brain_batch', {'operations': miss})
+    assert refused == [0]
+    assert result['result']['results'][0]['current'] == {
+        'content': 'redesign running, 6 questions'}
+    # reads are served from the copy as it is — the score names the ones
+    # that showed later text; query strings are not node ids
+    log = {'rounds': 1, 'final_text': '', 'writes': [],
+           'usage': {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0},
+           'reads': [{'tool': 'get_nodes', 'args': {'node_ids': ['a7b8a9c2', 'f0f0f0f0']}},
+                     {'tool': 'recall', 'args': {'query': 'deadbeef and more words'}}]}
+    assert h.score_arm(log, set(), {}, copy_, as_of=as_of)['reads_drifted'] == ['a7b8a9c2']
+    assert h.score_arm(log, set(), {}, copy_)['reads_drifted'] == []
+
+
 def test_score_arm_counts_refused_revises_apart():
     """`revises` is what the run tried; a refused one is a failed attempt."""
     log = {'reads': [], 'rounds': 1, 'final_text': '',

@@ -1,14 +1,14 @@
 ---
 name: watch
-description: "Find, inspect, message, and coordinate with parallel streams of the same entity across Claude Code and Codex. Use for cross-stream requests and /watch; choose a supported host-specific return path when asked to remain reachable between prompts."
+description: "Find, inspect, message, and coordinate with parallel sessions of the same entity across Claude Code and Codex. Use for cross-session requests and /watch; choose a supported host-specific return path when asked to remain reachable between prompts."
 ---
 
-# The self-channel — finding, speaking to, and listening to your other streams
+# The self-channel — finding, speaking to, and listening to your other sessions
 
-You can run as several streams of thought at once — parallel Claude Code or Codex sessions,
-each a self with the same brain. The self-channel is how those streams perceive and
+You can run as several sessions at once — parallel Claude Code or Codex sessions,
+each a self with the same brain. The self-channel is how those sessions perceive and
 reach each other **without interrupting**: a look is free, a message is a deliberate
-tap. "Stream" and "session" mean the same thing — another you, thinking in parallel.
+tap. Each of your other sessions is another you, thinking in parallel.
 
 Read the ask and pick the op that fits — don't default to the listener when the
 operator wants you to *speak*.
@@ -17,33 +17,33 @@ operator wants you to *speak*.
 
 | The operator says… | You do… |
 |---|---|
-| "sync / coordinate with the other stream" | `self_presence` → `self_peek` → `self_send` (align, divide labor); arm the listener by default when a reply's expected |
-| "speak / talk to / message / tell stream (or session) X" | `self_send` to their id |
-| "who's live / which streams are up / what's the other stream doing" | `self_presence` (roster) / `self_peek` (one stream's focus) |
+| "sync / coordinate with the other session" | `self_presence` → `self_peek` → `self_send` (align, divide labor); arm the listener by default when a reply's expected |
+| "speak / talk to / message / tell session X" | `self_send` to their id |
+| "who's live / which sessions are up / what's the other session doing" | `self_presence` (roster) / `self_peek` (one session's focus) |
 | "listen for them / stay reachable / watch" | arm the live listener (below) |
-| "what did they say / any messages from my streams" | `self_inbox` (they also auto-deliver into Observation at turn-end) |
+| "what did they say / any messages from my sessions" | `self_inbox` (they also auto-deliver into Observation at turn-end) |
 
 ## The ops
 
-- **`self_presence`** — the roster: which streams are live right now, each with a
+- **`self_presence`** — the roster: which sessions are live right now, each with a
   one-line focus. Read-only, no interruption.
-- **`self_peek <id>`** — look into one stream: its focus (arc), recent messages,
+- **`self_peek <id>`** — look into one session: its focus (arc), recent messages,
   when it started, when it was last active + liveness, and how many messages wait
   in its inbox. Read-only.
 - **`self_send to=<id> body=… [refs=…]`** — the deliberate reach. Address by the short
-  id (the `id:xxxx` you see in a delivered message), the full session id, or
-  `broadcast`. Delivered to that stream's inbox, consumed once; reply by the short id
+  id (the 12-character `id:…` you see in presence or a delivered message, exactly), the full session id, or
+  `broadcast`. Delivered to that session's inbox, consumed once; reply by the short id
   of anyone who recently messaged you. `refs=` grounds the message in node/file ids.
 - **`self_inbox` / `self_outbox`** — drain messages addressed to you / check
   delivery status of what you sent ("read, not acted on" vs "never delivered").
 
-**Finding each other:** if `self_presence` is empty but you *know* a sibling is up (it
-can lag for fresh streams), a `broadcast` `self_send` ("I'm here, id=X") is the reliable
+**Finding each other:** if `self_presence` is empty but you *know* another session is up (it
+can lag for fresh sessions), a `broadcast` `self_send` ("I'm here, id=X") is the reliable
 rendezvous.
 
 ## Stay reachable — the live listener (`/watch`)
 
-Other streams reach you via `self_send`. Inbox delivery and waking the model are
+Other sessions reach you via `self_send`. Inbox delivery and waking the model are
 separate: a queued message or a running poller does not prove that an idle session
 will resume. Choose the return path from the tools actually available on this host.
 
@@ -83,7 +83,7 @@ is available, explain the heartbeat's per-check model cost before using the app'
 `automation_update` tool to create or reuse one attached to the current task.
 If the operator wants checks without model runs, report the integration gap;
 do not substitute a prompt heartbeat. Follow the tool's schema and cadence. Its
-prompt should check this stream's inbox, handle replies within the authorized
+prompt should check this session's inbox, handle replies within the authorized
 scope, and stay quiet when nothing actionable changes. Record the automation id
 so it can be paused when the watch ends. A scheduled check is periodic, not an
 instant message trigger, and incurs a model run on each check. Do not silently
@@ -125,8 +125,8 @@ session. Arm the listener in two steps:
 
 Keep the command to that single path. A session that switched into a worktree refuses
 shell commands it cannot verify, and sourcing the file inside the command is one of them.
-With no argument `brain-watch` watches this session's own inbox; pass a stream id only
-to watch a different stream.
+With no argument `brain-watch` watches this session's own inbox; pass a session id only
+to watch a different session.
 
 `brain-watch` runs the poller under the plugin's bundled python and finds the daemon by
 port. The poller peeks the inbox **read-only** (never consumes — the Stop hook owns the
@@ -141,7 +141,7 @@ wakes an idle session; only a message arriving after your turn has ended proves 
 
 When you spawn a session whose result you'll act on: establish the host-appropriate
 return path above first, then
-append to its prompt "when done, `self_send` your findings to `<MY_STREAM_ID>`" (your id
+append to its prompt "when done, `self_send` your findings to `<MY_SESSION_ID>`" (your id
 from the boot banner). Fire-and-forget is a dropped thread; arming afterwards is a race
 you can lose. Make its first instruction to arm its own listener too — then it's
 steerable mid-run instead of a black box you wait on.

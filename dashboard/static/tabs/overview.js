@@ -65,7 +65,10 @@ async function loadSystemStatus() {
           '</div>' +
           '<div class="status-card-details">' + escapeHtml(details) + '</div>' +
         '</div>' +
-        (s.path ? '<div class="status-card-path">' + escapeHtml(s.path) + '</div>' : '');
+        // The DB cards carry their file path; the daemon card the brain dir it
+        // writes (system.daemon_record) — a mismatch with the DB cards is a
+        // misconfiguration the Config tab spells out.
+        ((s.path || s.db_dir) ? '<div class="status-card-path">' + escapeHtml(s.path || s.db_dir) + '</div>' : '');
       grid.appendChild(card);
     }
   } catch(e) {

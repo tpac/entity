@@ -19,6 +19,7 @@ import threading
 
 from servers.daemon_server import BrainDaemon
 from servers.brain import Brain
+from servers.scales.s1.surface_contract import SURFACE_MODEL
 
 
 # ── gating ──────────────────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ def test_warm_calls_models_retrieve_once():
     client = _StubClient()
     brain = _StubBrain(client)
     assert Brain.warm_anthropic_connection(brain) is True
-    assert client.models.calls == ['claude-haiku-4-5']  # one free retrieve, right model
+    assert client.models.calls == [SURFACE_MODEL]  # one free retrieve, right model
 
 
 def test_warm_self_heals_missing_client():

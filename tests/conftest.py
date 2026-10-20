@@ -310,6 +310,20 @@ _db_home = tempfile.mkdtemp(prefix='pytest_brain_db_')
 atexit.register(shutil.rmtree, _db_home, True)
 os.environ['BRAIN_DB_DIR'] = _db_home
 
+# The operator's Codex home, pinned for the same reason. The Codex adapter asks
+# Codex's app-server about Entity's hooks (hooks/adapters/codex_onboarding.py)
+# when the proxy initializes and on a chat's first prompt; a test that reaches
+# it unpatched reads this empty home, never ~/.codex.
+_codex_home = tempfile.mkdtemp(prefix='pytest_codex_home_')
+atexit.register(shutil.rmtree, _codex_home, True)
+os.environ['CODEX_HOME'] = _codex_home
+
+# The host's attended flag, removed. A suite run from a session nobody
+# attends (`claude -p`, an SDK script) inherits CLAUDE_CODE_SESSION_ATTENDED=0,
+# and every prompt-hook test would read its operator prompt as the harness's
+# (host_contract `unattended`). Tests of that rule set it themselves.
+os.environ.pop('CLAUDE_CODE_SESSION_ATTENDED', None)
+
 
 # The suite is an entity. The pins above keep it off the operator's config and
 # brain; this keeps it off the operator's DAEMON. Left alone, `./dev` hands the

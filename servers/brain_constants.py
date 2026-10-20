@@ -7,6 +7,7 @@ This module imports nothing from the brain, so per-tool-call hooks can
 reach it without paying for the daemon's config import.
 """
 import os
+import re
 
 
 def user_config_dir() -> str:
@@ -15,6 +16,102 @@ def user_config_dir() -> str:
     half of the shell resolver's spelling (api-key-env.sh); one accessor so the
     readers of one directory cannot split."""
     return os.environ.get('XDG_CONFIG_HOME') or os.path.join(os.path.expanduser('~'), '.config')
+
+
+def user_env_file() -> str:
+    """`~/.config/brain/env` — the one user-editable config file (API key,
+    names, BRAIN_DB_DIR, the gate switches). The Python spelling of
+    api-key-env.sh's brain_user_env_file."""
+    return os.path.join(user_config_dir(), 'brain', 'env')
+
+
+def _env_assignment(line: str, key: str):
+    """The raw right-hand side when `line` assigns `key` in shell grammar
+    (optional `export `), else None. The ONE place the file's line shape is
+    known — the reader and the writer below both go through it."""
+    s = line.strip()
+    if s.startswith('export '):
+        s = s[len('export '):].lstrip()
+    if not s.startswith(key + '='):
+        return None
+    return s.split('=', 1)[1].strip()
+
+
+def read_env_file_key(path: str, key: str):
+    """Read one KEY=value from a config file that shell consumers SOURCE —
+    so tolerate the shell grammar the same file is written in: optional
+    `export `, single/double quotes, inline comments on unquoted values,
+    $VAR expansion. resolved.env writes values single-quoted. Returns None
+    if absent/unreadable — the readers of one file must not disagree on its
+    grammar (that's the split-brain class D-13 kills). Lives in this leaf so
+    the per-hook gate (servers/brain_gate.py) can read the file without
+    importing daemon_config."""
+    try:
+        with open(path, errors='replace') as f:
+            for raw in f:
+                v = _env_assignment(raw, key)
+                if v is None:
+                    continue
+                if v[:1] in ('"', "'"):
+                    end = v.find(v[0], 1)
+                    v = v[1:end] if end > 0 else v[1:]
+                else:
+                    v = v.split(' #', 1)[0].rstrip()
+                if v:
+                    return os.path.expanduser(os.path.expandvars(v))
+    except OSError:
+        pass
+    return None
+
+
+def write_env_file_key(path: str, key: str, value: str) -> None:
+    """Replace (or, with value '', remove) the `KEY=` line of a config file
+    that shell consumers source. Other lines are kept byte-for-byte. Atomic
+    replace, mode 600 — the file holds the API key. The writer half of
+    read_env_file_key's grammar, in the same leaf for the same reason."""
+    lines = []
+    try:
+        with open(path, errors='replace') as f:
+            lines = [l.rstrip('\n') for l in f if _env_assignment(l, key) is None]
+    except OSError:
+        pass
+    if value:
+        lines.append('%s=%s' % (key, value))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp.%d' % os.getpid()
+    try:
+        os.unlink(tmp)   # a leftover from a crashed writer; O_EXCL below refuses anything else
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write('\n'.join(lines) + ('\n' if lines else ''))
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def brain_tmp_dir() -> str:
+    """Root for the brain's per-session marker files (session_marker_path).
+    Honors BRAIN_TMP_DIR — the test suite pins one per process so two pytest
+    runs never collide on fixed filenames; production leaves it unset →
+    /tmp."""
+    return os.environ.get('BRAIN_TMP_DIR', '/tmp')
+
+
+def session_marker_path(name, session_id) -> str:
+    """This session's marker file for `name` under brain_tmp_dir, or '' with
+    no session id (callers then decide without caching).
+
+    A marker holds what a hook must know BEFORE it talks to the daemon, or
+    without talking to it at all — the gate's per-session project, the
+    prompt hook's first-call budget. State the daemon can read from traces
+    does not belong here. Keyed by the whole id: Codex ids are UUIDv7, whose
+    leading characters are a timestamp every chat opened in the same minute
+    shares."""
+    if not session_id:
+        return ''
+    return os.path.join(brain_tmp_dir(), 'brain-%s-%d-%s' % (
+        name, os.getuid(), re.sub(r'[^\w-]', '_', session_id)))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -130,7 +227,7 @@ MAINTENANCE_MIN_INTERVAL_SECONDS = 60 * 60    # 1 hour between runs — throttle
 # In addition to the time gate, require at least this many S1 Encoder (Scribe)
 # runs since the last S2 run. S2's material is encoded nodes — a recall (S1
 # Surface) reads the graph and creates nothing to consolidate, and surfaces
-# fire across many parallel streams. So cadence ties to ENCODING, not recalls:
+# fire across many parallel sessions. So cadence ties to ENCODING, not recalls:
 # no new encoded nodes → nothing for S2 to do → don't fire. The Scribe runs
 # every 5th conversational turn, so 2 runs ≈ 10 turns of new material. The
 # FORCE_FIRE valve below still overrides this for multi-day stalls.
@@ -231,13 +328,19 @@ ANTHROPIC_CONNECT_TIMEOUT = 10.0
 DASHBOARD_DEFAULT_PORT = 47303
 
 
-def dashboard_setup_url() -> str:
-    """The /setup URL keyless notices point users at.
-
-    Reads DASHBOARD_PORT from the environment (populated from
-    ~/.config/brain/env by load_env on the keyless path, so a custom port
-    is honored daemon-side) with the fixed default as fallback.
-    """
+def dashboard_url(path: str = '') -> str:
+    """The dashboard's URL, `path` appended. DASHBOARD_PORT from the process
+    environment, else from the user env file (the boot gate asks before the
+    shell has sourced it; the daemon's load_env may not have run yet either),
+    else the fixed default — the same ladder the dashboard service itself
+    resolves."""
     import os
-    return "http://localhost:%s/setup" % (
-        os.environ.get('DASHBOARD_PORT') or DASHBOARD_DEFAULT_PORT)
+    port = (os.environ.get('DASHBOARD_PORT')
+            or read_env_file_key(user_env_file(), 'DASHBOARD_PORT')
+            or DASHBOARD_DEFAULT_PORT)
+    return "http://localhost:%s%s" % (port, path)
+
+
+def dashboard_setup_url() -> str:
+    """The /setup URL keyless notices point users at."""
+    return dashboard_url('/setup')

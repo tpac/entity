@@ -81,16 +81,20 @@ class SessionContext:
         #                   'access_count': int, 'last_accessed': iso_str}}
         self.node_activity: Dict[str, Dict[str, object]] = {}
         self.boot_time: str = ''  # ISO timestamp; empty means not booted yet
+        # The Thalamus delivered at this session's first operator prompt
+        # (daemon_hooks.hook_recall → channels/delivery.PROMPT). Once per
+        # session: later prompts are mid-thread, and Stop carries the rest.
+        self.prompt_delivered: bool = False
         # Session env — the Claude-side facts (working dir + git branch) FED IN
         # from the boot hook; the daemon never introspects Claude to learn them.
-        # Per-session identity (not activity), surfaced in peek so streams can
+        # Per-session identity (not activity), surfaced in peek so sessions can
         # tell where each other is working. Stable for the session's life.
         self.cwd: str = ''
         self.branch: str = ''
-        # The linked worktree this stream works in (CC WorktreeCreate `name`),
+        # The linked worktree this session works in (CC WorktreeCreate `name`),
         # or '' for the main working tree. Per-session — replaces the global
         # `current_worktree` config that was last-writer-wins across parallel
-        # streams (two streams in different worktrees clobbered each other).
+        # sessions (two sessions in different worktrees clobbered each other).
         # Stamped at boot (derived from cwd) and refreshed on WorktreeCreate/Remove.
         self.worktree: str = ''
         # Deterministic project identity — the main repo's directory name
@@ -99,7 +103,7 @@ class SessionContext:
         # written by an agent — derived from cwd at boot, stamped onto every
         # S0/S1 write by the dispatch chokepoints. Read by the LAF proj lane.
         self.project: str = ''
-        # What the stream rides on — the model that produced the latest turn
+        # What the session rides on — the model that produced the latest turn
         # and the host runtime resolved by host_contract. Fed in per turn by the
         # UserPromptSubmit / Stop hooks; stamped onto every S0 row by the S0
         # write door (trace_contract.S0_SESSION_STAMP_FIELDS). The value here is
@@ -113,8 +117,9 @@ class SessionContext:
 
     @property
     def session_short(self) -> str:
-        """First 8 chars of session_id — used in chain IDs."""
-        return self.session_id[:8]
+        """The session part of chain IDs — trace_contract.session_short."""
+        from .trace_contract import session_short
+        return session_short(self.session_id)
 
     def increment_stop(self):
         """Increment stop counter. Called by the Stop hook."""
@@ -203,14 +208,14 @@ class SessionContext:
 
     def set_env(self, cwd: str = '', branch: str = '', worktree=None,
                 project=None, model: str = '', host: str = '') -> None:
-        """Stamp the Claude-side session env — where this stream is working and
+        """Stamp the Claude-side session env — where this session is working and
         what it rides on.
 
         Single mutator for the per-session identity fed in from the boot hook, the
         WorktreeCreate/Remove hooks and the per-turn recall/Stop hooks (the daemon
         never introspects the host). The per-session replacement for the global
         cwd/branch/worktree config that was last-writer-wins across parallel
-        streams.
+        sessions.
 
         cwd/branch/model/host refresh only on a truthy value — falsy (''/None)
         leaves the existing value, so a failed detection never clobbers a known
@@ -248,6 +253,7 @@ class SessionContext:
             'last_delivery_armed_at': self.last_delivery_armed_at,
             'fatigue': self.fatigue,
             'boot_time': self.boot_time,
+            'prompt_delivered': self.prompt_delivered,
             'cwd': self.cwd,
             'branch': self.branch,
             'worktree': self.worktree,
@@ -285,6 +291,7 @@ class SessionContext:
             ctx.last_delivery_armed_at = data.get('last_delivery_armed_at', '') or ''
             ctx.fatigue = {k: int(v) for k, v in data.get('fatigue', {}).items()}
             ctx.boot_time = data.get('boot_time', '') or ''
+            ctx.prompt_delivered = bool(data.get('prompt_delivered', False))
             ctx.cwd = data.get('cwd', '') or ''
             ctx.branch = data.get('branch', '') or ''
             ctx.worktree = data.get('worktree', '') or ''
@@ -314,6 +321,8 @@ class SessionContext:
             # The row EXISTED but won't parse — corrupt, not absent. Signal it so
             # the brain-holding caller logs via the canonical brain._log_error.
             # (Pure data carrier: no brain ref, no DAL reach, no logging here.)
+            # Named by the owner directly: a parse failure leaves no ctx.
+            from .trace_contract import session_short
             raise SessionContextCorrupt(
-                'corrupt session_state blob for %s: %s' % ((session_id or '')[:8], e)
+                'corrupt session_state blob for %s: %s' % (session_short(session_id), e)
             ) from e

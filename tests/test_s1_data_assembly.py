@@ -1,7 +1,7 @@
 """Tests for S1 encode data assembly functions.
 
 Tests the pure data assembly layer that prepares input for the S1 encoder LLM:
-- _gather_messages: reads S0 traces into the format expected by the encoder
+- _window: reads the encoder's conversation window from S0 traces
 - build_node_catalog: extracts and formats nodes from surface outputs
 
 No LLM calls — these are all deterministic data transformations.
@@ -10,6 +10,7 @@ Run: python3 -m pytest tests/test_s1_data_assembly.py -v
 """
 import pytest
 from datetime import datetime, timezone
+from servers.trace_contract import row_text
 from tests.isolated_brain import SeedBrain
 
 
@@ -28,8 +29,9 @@ def _insert_node(conn, node_id, node_type='rule', title='Test node', content='Te
     conn.commit()
 
 
-class TestGatherMessages:
-    """Tests for _gather_messages(brain, session_id) — trace-based message retrieval."""
+class TestWindow:
+    """Tests for _window(brain, session_id) — the encoder's conversation
+    window read through brain.conversation_turns."""
 
     @pytest.fixture(autouse=True)
     def setup_brain(self):
@@ -38,98 +40,65 @@ class TestGatherMessages:
             self.dal = env.brain._trace_dal
             # No trace clearing: a SeedBrain's logs DB is freshly built and
             # holds zero trace_events, and every test here writes and reads
-            # its own session_id. The old DELETE existed because IsolatedBrain
-            # cloned production's traces.
+            # its own session_id.
             yield
 
-    def test_empty_session_returns_empty(self):
-        """No traces for session -> empty list."""
-        from servers.scales.s1.encode import _gather_messages
-        result = _gather_messages(self.brain, 'nonexistent-session-xyz')
-        assert result == []
-
-    def test_returns_turns_from_s0_traces(self):
-        """S0 user+assistant traces -> list of turn dicts with correct shape."""
-        from servers.scales.s1.encode import _gather_messages
-        session_id = 'test-gather-001'
-
-        # Write S0 traces: a user message and an assistant response
-        chain = 's0-testgath-1'
+    def _turn(self, session_id, chain, question, answer=None):
         self.dal.append(
             chain_id=chain, scale='s0', event_type='K',
-            ref_type='user_message', ref_id='',
-            summary='How does recall work?',
-            metadata={'content': 'How does recall work?', 'recall_chain': 's1r-testgath-1'},
-            session_id=session_id)
-        self.dal.append(
-            chain_id=chain, scale='s0', event_type='delta',
-            ref_type='assistant_message', ref_id='',
-            summary='Recall uses embeddings...',
-            metadata={'content': 'Recall uses embeddings to find similar nodes.'},
-            session_id=session_id)
-        self.brain.logs_conn.commit()
-
-        result = _gather_messages(self.brain, session_id)
-        assert len(result) == 2
-
-        user_turn = result[0]
-        assert user_turn['role'] == 'user'
-        assert 'recall' in user_turn['content'].lower()
-        assert user_turn['trace_id']  # the reference source_refs copy
-
-        asst_turn = result[1]
-        assert asst_turn['role'] == 'assistant'
-        assert 'embeddings' in asst_turn['content'].lower()
-
-    def test_respects_max_messages_limit(self):
-        """When more turns exist than max_messages, only the most recent are returned."""
-        from servers.scales.s1.encode import _gather_messages
-        from servers.scales.s1.encode_contract import ENCODING_AGENT
-
-        session_id = 'test-gather-limit'
-        max_msgs = ENCODING_AGENT['max_messages']
-
-        # Write more turns than the limit (each turn = user + assistant = 2 messages)
-        num_turns = (max_msgs // 2) + 5
-        for i in range(num_turns):
-            chain = 's0-testlim-%d' % i
-            self.dal.append(
-                chain_id=chain, scale='s0', event_type='K',
-                ref_type='user_message', ref_id='',
-                summary='Question %d' % i,
-                metadata={'content': 'Question number %d about the brain' % i},
-                session_id=session_id)
+            ref_type='user_message', ref_id='', summary=question[:200],
+            metadata={'content': question}, session_id=session_id)
+        if answer is not None:
             self.dal.append(
                 chain_id=chain, scale='s0', event_type='delta',
-                ref_type='assistant_message', ref_id='',
-                summary='Answer %d' % i,
-                metadata={'content': 'Answer to question %d' % i},
-                session_id=session_id)
+                ref_type='assistant_message', ref_id='', summary=answer[:200],
+                metadata={'content': answer}, session_id=session_id)
+
+    def test_empty_session_returns_empty(self):
+        """No traces for session -> empty window."""
+        from servers.scales.s1.encode import _window
+        assert _window(self.brain, 'nonexistent-session-xyz') == []
+
+    def test_returns_turns_from_s0_traces(self):
+        """S0 user+assistant traces -> one turn holding both rows."""
+        from servers.scales.s1.encode import _window
+        session_id = 'test-window-001'
+        self._turn(session_id, 's0-testwin-1', 'How does recall work?',
+                   'Recall uses embeddings to find similar nodes.')
         self.brain.logs_conn.commit()
 
-        result = _gather_messages(self.brain, session_id)
-        assert len(result) <= max_msgs, (
-            "Should respect max_messages=%d, got %d" % (max_msgs, len(result)))
+        turns = _window(self.brain, session_id)
+        assert len(turns) == 1
+        assert 'recall' in row_text(turns[0]['user']).lower()
+        assert turns[0]['user']['id']  # the reference source_refs copy
+        assert 'embeddings' in row_text(turns[0]['assistant']).lower()
+
+    def test_respects_window_max_turns(self):
+        """A backlog past window_max_turns keeps the newest turns."""
+        from unittest.mock import patch
+        from servers.scales.s1.encode import _window
+        from servers.scales.s1.encode_contract import ENCODING_AGENT
+
+        session_id = 'test-window-limit'
+        for i in range(8):
+            self._turn(session_id, 's0-testlim-%d' % i,
+                       'Question number %d about the brain' % i, 'Answer %d' % i)
+        self.brain.logs_conn.commit()
+
+        with patch.dict(ENCODING_AGENT, {'window_max_turns': 5}):
+            turns = _window(self.brain, session_id)
+        assert [row_text(t['user']) for t in turns] == [
+            'Question number %d about the brain' % i for i in range(3, 8)]
 
     def test_content_preserves_whole_stored_episode(self):
-        """Gathering must not discard the end of a stored episode."""
-        from servers.scales.s1.encode import _gather_messages
-
-        session_id = 'test-gather-trunc'
+        """The window must not discard the end of a stored episode."""
+        from servers.scales.s1.encode import _window
+        session_id = 'test-window-trunc'
         long_content = 'x' * 7990 + 'TAIL_PROOF'
-
-        chain = 's0-testtrn-1'
-        self.dal.append(
-            chain_id=chain, scale='s0', event_type='K',
-            ref_type='user_message', ref_id='',
-            summary='Long message',
-            metadata={'content': long_content},
-            session_id=session_id)
+        self._turn(session_id, 's0-testtrn-1', long_content)
         self.brain.logs_conn.commit()
 
-        result = _gather_messages(self.brain, session_id)
-        assert len(result) >= 1
-        assert result[0]['content'] == long_content
+        assert row_text(_window(self.brain, session_id)[0]['user']) == long_content
 
 
 class TestBuildNodeCatalog:
@@ -349,10 +318,13 @@ def _ep(eid, ref_type, content, created_at):
 
 
 _EMPTY_STREAMS = {'surface': [], 'encode': [], 'touched': []}
-_DATED_MSGS = [
-    {'role': 'user', 'content': 'alpha question'},
-    {'role': 'user', 'content': 'beta question'},
-]
+
+
+def _turns(episodes):
+    """Episodes grouped the way brain.conversation_turns hands them to the
+    encoder, oldest first."""
+    from servers.trace_contract import group_turns
+    return group_turns(sorted(episodes, key=lambda e: e['created_at']))
 
 
 class TestAssociatedStubIds:
@@ -381,7 +353,7 @@ class TestAssociatedStubIds:
                 {'id': 'bbbb2222', 'type': 'lesson', 'effective_activation': 0.7},
             ],
         })
-        out = _associated_stub_ids(brain, _DATED_MSGS, 'testsess',
+        out = _associated_stub_ids(brain, _turns(brain._episodes), 'testsess',
                                    {'cata0001'}, streams=_EMPTY_STREAMS)
         # catalog id filtered; rank order by best single match
         assert out == ['aaaa1111', 'bbbb2222']
@@ -405,8 +377,7 @@ class TestAssociatedStubIds:
         eps = [_ep('u%d' % i, 'user_message', 'question number %d' % i,
                    '2026-08-21T10:%02d:00+00:00' % i) for i in range(n)]
         brain = _StubRecallBrain(eps, {})
-        msgs = [{'role': 'user', 'content': '[Current date: 2026-08-21] q'}] * n
-        _associated_stub_ids(brain, msgs, 'testsess', {'x'},
+        _associated_stub_ids(brain, _turns(brain._episodes), 'testsess', {'x'},
                              streams=_EMPTY_STREAMS)
         queries = [q for q, _kw in brain.recall_calls]
         assert len(queries) == ASSOCIATED_SEED_CAP
@@ -419,8 +390,7 @@ class TestAssociatedStubIds:
         eps = [_ep('u%d' % i, 'user_message', 'ok',
                    '2026-08-21T10:%02d:00+00:00' % i) for i in range(3)]
         brain = _StubRecallBrain(eps, {})
-        msgs = [{'role': 'user', 'content': 'ok'}] * 3
-        _associated_stub_ids(brain, msgs, 'testsess', {'x'},
+        _associated_stub_ids(brain, _turns(brain._episodes), 'testsess', {'x'},
                              streams=_EMPTY_STREAMS)
         assert [q for q, _kw in brain.recall_calls] == ['ok']
 
@@ -430,7 +400,7 @@ class TestAssociatedStubIds:
         hits = [{'id': 'node%04d' % i, 'type': 'fact',
                  'effective_activation': 1.0 - i * 0.01} for i in range(9)]
         brain = _StubRecallBrain(self._episodes(), {'alpha question': hits})
-        out = _associated_stub_ids(brain, _DATED_MSGS, 'testsess',
+        out = _associated_stub_ids(brain, _turns(brain._episodes), 'testsess',
                                    {'unrelated'}, streams=_EMPTY_STREAMS)
         assert len(out) == ASSOCIATED_STUBS_K
         assert out == ['node%04d' % i for i in range(ASSOCIATED_STUBS_K)]
@@ -445,7 +415,7 @@ class TestAssociatedStubIds:
         monkeypatch.setattr(encode, '_turn_links', lambda *a, **kw: (
             {'u1': {'surfaced': [], 'encoded': [], 'encoded_by': 'run-1'},
              'u2': {'surfaced': [], 'encoded': [], 'encoded_by': None}}, {}))
-        out = encode._associated_stub_ids(brain, _DATED_MSGS, 'testsess',
+        out = encode._associated_stub_ids(brain, _turns(brain._episodes), 'testsess',
                                           {'unrelated'}, streams=_EMPTY_STREAMS)
         assert [q for q, _kw in brain.recall_calls] == ['beta question']
         assert out == ['bbbb2222']
@@ -453,7 +423,7 @@ class TestAssociatedStubIds:
     def test_no_seeds_returns_empty_without_recall(self):
         from servers.scales.s1.encode import _associated_stub_ids
         brain = _StubRecallBrain([], {})
-        out = _associated_stub_ids(brain, _DATED_MSGS, 'testsess',
+        out = _associated_stub_ids(brain, _turns(brain._episodes), 'testsess',
                                    {'x'}, streams=_EMPTY_STREAMS)
         assert out == []
         assert brain.recall_calls == []
@@ -539,14 +509,25 @@ class TestAssociatedStubsRender:
         assert ASSOCIATED_TAG not in text
         assert text.splitlines()[0] == 'Node Catalog (1 nodes surfaced this session)'
 
+    def _window(self):
+        """One turn as encode._window hands it over: the prompt row (with
+        its judge_output) and the reply."""
+        user = {'id': 'aaaaaaaa', 'ref_type': 'user_message', 'chain_id': 's0-assoc-1',
+                'created_at': '2026-08-21T10:00:00+00:00', 'summary': 'hi',
+                'metadata': {'content': 'hi'}, 'content': 'hi',
+                'judge_output': self._judge()}
+        reply = {'id': 'bbbbbbbb', 'ref_type': 'assistant_message',
+                 'chain_id': 's0-assoc-1', 'created_at': '2026-08-21T10:01:00+00:00',
+                 'summary': 'hello', 'metadata': {'content': 'hello'}, 'content': 'hello'}
+        return [{'user': user, 'with': [], 'assistant': reply, 'actions': []}]
+
     def test_build_catalog_gate_flag_off_no_retrieval(self, monkeypatch):
         from servers.scales.s1 import encode
         monkeypatch.delenv('BRAIN_S1E_ASSOCIATED_STUBS', raising=False)
         monkeypatch.setattr(encode, '_associated_stub_ids',
                             lambda *a, **kw: pytest.fail('retrieval ran with flag off'))
-        messages = [{'role': 'user', 'content': 'hi', 'judge_output': self._judge()}]
         text, ids, _streams = encode._build_catalog(
-            self.brain, messages, 'assoc-gate-off')
+            self.brain, self._window(), 'assoc-gate-off')
         assert self.NODE_A in ids
 
     def test_build_catalog_gate_flag_on_renders_stubs(self, monkeypatch):
@@ -555,15 +536,13 @@ class TestAssociatedStubsRender:
         monkeypatch.setenv('BRAIN_S1E_ASSOCIATED_STUBS', '1')
         seen = {}
 
-        def fake_retrieval(brain, messages, session_id, exclude_ids,
-                           streams=None, turns=None):
+        def fake_retrieval(brain, turns, session_id, exclude_ids, streams=None):
             seen['exclude'] = set(exclude_ids)
             return [self.NODE_B]
 
         monkeypatch.setattr(encode, '_associated_stub_ids', fake_retrieval)
-        messages = [{'role': 'user', 'content': 'hi', 'judge_output': self._judge()}]
         text, ids, _streams = encode._build_catalog(
-            self.brain, messages, 'assoc-gate-on')
+            self.brain, self._window(), 'assoc-gate-on')
         # exclusion set is exactly what the catalog will show
         assert self.NODE_A in seen['exclude']
         assert ASSOCIATED_TAG in text
@@ -577,9 +556,8 @@ class TestAssociatedStubsRender:
             raise RuntimeError('recall exploded')
 
         monkeypatch.setattr(encode, '_associated_stub_ids', boom)
-        messages = [{'role': 'user', 'content': 'hi', 'judge_output': self._judge()}]
         text, ids, _streams = encode._build_catalog(
-            self.brain, messages, 'assoc-gate-err')
+            self.brain, self._window(), 'assoc-gate-err')
         # catalog still renders, stubs absent
         assert self.NODE_A in ids
         from servers.scales.s1.encode_contract import ASSOCIATED_TAG
@@ -595,9 +573,6 @@ class TestAssociatedStubsRender:
         from tests.interaction_override import interaction_override
         monkeypatch.setattr(encode, '_associated_stub_ids',
                             lambda *a, **kw: [self.NODE_B])
-        messages = [{'role': 'user', 'content': 'hi', 'trace_id': 'aaaaaaaa',
-                     'judge_output': self._judge()},
-                    {'role': 'assistant', 'content': 'hello', 'trace_id': 'bbbbbbbb'}]
         loop_result = {'rounds': 1, 'actions': 0, 'write_actions': 0,
                        'action_details': [], 'read_calls': [], 'final_text': 'done',
                        'elapsed_ms': 1, 'input_tokens': 0, 'output_tokens': 0,
@@ -612,7 +587,7 @@ class TestAssociatedStubsRender:
         with interaction_override(self.brain, 's1e', template=template), \
                 mock.patch.object(encoder_view, 'associated_stubs_enabled',
                                   side_effect=[True]), \
-                mock.patch.object(encode, '_gather_messages', return_value=messages), \
+                mock.patch.object(encode, '_window', return_value=self._window()), \
                 mock.patch('servers.scales.runner.make_client', return_value=object()), \
                 mock.patch.object(encode, 'run_llm_loop', side_effect=loop), \
                 mock.patch.object(self.brain, '_log_error',

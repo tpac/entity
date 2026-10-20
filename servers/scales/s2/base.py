@@ -112,9 +112,11 @@ class IntegrationUnit:
             brain: Brain instance — the daemon's brain. Units run in-process
                    with direct DB access (writes serialize under
                    brain.write_lock via _make_encoder_dispatch).
-            dispatch_fn: Optional pre-built dispatch. None (the norm) means
-                         build the in-process encoder dispatch in
-                         _make_encoder_dispatch.
+            dispatch_fn: Optional executor for the unit's tool calls (evals,
+                         tests). _make_encoder_dispatch wraps it with the
+                         unit's rules in place of dispatch_command; None (the
+                         norm) executes through dispatch_command under
+                         brain.write_lock.
         """
         self.brain = brain
         self.dispatch = dispatch_fn
@@ -253,10 +255,16 @@ class IntegrationUnit:
                 to prevent the encoder archiving nodes outside its cluster.
                 None → no guard.
 
+        An injected dispatch_fn (evals, tests) is WRAPPED, not returned: the
+        rules below are the unit's, whatever executes its tool calls, so an
+        eval arm writes with the identity and attribution production stamps.
+        Only the final call goes to it, and it owns its own locking. (The
+        unit's own trace() rows go to it directly — they carry no
+        attribution.)
+
         Returns: dispatch(cmd, cmd_args) → handler result.
         """
-        if self.dispatch:
-            return self.dispatch
+        injected = self.dispatch
 
         from servers.daemon_dispatch import dispatch_command
 
@@ -284,8 +292,7 @@ class IntegrationUnit:
             # Channel refusal for operator-only commands (the declared set in
             # scales/dispatch.py). Defense-in-depth: the owner method also
             # refuses non-anchor encoding_source at the write boundary — this
-            # closure is one channel, not the whole gate (units built with an
-            # injected dispatch_fn never reach it).
+            # closure is one channel, not the whole gate.
             if cmd in OPERATOR_ONLY_COMMANDS:
                 brain._log_error(
                     's2_%s_lock_refused' % unit_name,
@@ -293,9 +300,12 @@ class IntegrationUnit:
                     'encoder dispatch refused %s (unit=%s)' % (cmd, unit_name))
                 return {'ok': False,
                         'error': '%s is operator-channel only' % cmd}
-            if unit_session and isinstance(cmd_args, dict):
+            if isinstance(cmd_args, dict):
                 from ...dispatch_common import CALLER_SESSION_KEY
-                cmd_args.setdefault(CALLER_SESSION_KEY, unit_session)
+                # Assigned, never defaulted: identity is the unit's, so a stamp
+                # or session_id the model wrote into its tool call claims
+                # nothing — and an S2 unit's '' stays sessionless.
+                cmd_args[CALLER_SESSION_KEY] = unit_session
             _scope_warnings = apply_encoder_attribution(
                 cmd, cmd_args,
                 encoding_source=encoding_source, run_chain_id=run_chain_id,
@@ -324,6 +334,8 @@ class IntegrationUnit:
                         surviving_ops.append(op)
                     cmd_args['operations'] = surviving_ops
 
+            if injected is not None:
+                return injected(cmd, cmd_args)
             # Serialize against daemon dispatch + autosave + embed_queue. S2
             # runs in-process but on a pool worker thread; without this, encoder
             # writes can interleave with concurrent client writes (and with each
@@ -558,7 +570,10 @@ class IntegrationUnit:
             cache_creation_tokens, model, interaction} for the call — token
             zeros when the call never ran or failed before a usage report;
             `interaction` is the K stamp resolved with the prompt, on every
-            path. Single-shot encoders (healer,
+            path; `failure` ('LLM call failed' / 'truncated response' /
+            'unparseable response') is set exactly when parsed_json is None,
+            and every cause is already logged here — callers read it, never
+            log again. Single-shot encoders (healer,
             aspect) thread this into their delta trace via build_delta_metadata
             (this is run_llm_loop's per-call telemetry, hand-built here because
             this path uses the runner's single-shot entry, not the loop).
@@ -603,6 +618,7 @@ class IntegrationUnit:
             print('[%s] LLM call failed: %s' % (self.NAME, e), flush=True)
             self.brain._log_error(self.NAME, e, 'LLM call for %s' % interaction_name)
             telemetry['elapsed_ms'] = int((time.time() - t0) * 1000)
+            telemetry['failure'] = 'LLM call failed'
             return None, telemetry
 
         # Truncation is loud on the single-shot path too — the loop path
@@ -628,4 +644,19 @@ class IntegrationUnit:
                 self.brain._log_error(
                     's2_%s_journal_harvest' % self.NAME, e,
                     'harvest failed — parsing the unstripped response')
-        return extract_json(raw), telemetry
+        parsed = extract_json(raw)
+        if parsed is None and telemetry.get('stop_reason') == 'max_tokens':
+            telemetry['failure'] = 'truncated response'   # logged above
+        elif parsed is None:
+            # The call succeeded and was paid for; the reply is the only
+            # evidence of why it can't be used, so it goes in the log whole
+            # rather than being dropped.
+            self.brain._log_error(
+                's2_%s_unparseable' % self.NAME,
+                'no JSON payload in the %s response (stop_reason=%s, %s '
+                'output tokens)' % (interaction_name,
+                                    telemetry.get('stop_reason'),
+                                    telemetry.get('output_tokens', 0)),
+                raw)
+            telemetry['failure'] = 'unparseable response'
+        return parsed, telemetry

@@ -18,18 +18,22 @@
 <!-- Tab order follows the brain's own scale vocabulary — the same names the
      Traces scale filter uses (S1 = turn, S2 = graph), so a tab and a filter
      never call the same scale two different things. Reading order is
-     narrowest-scope to widest: this turn, the streams having turns, the graph
+     narrowest-scope to widest: this turn, the sessions having turns, the graph
      they all write into, then the raw record and the errors. -->
 <div class="tabs">
   <div class="tab active" data-tab="live"     onclick="switchTab('live')">Live <span class="tab-sub">S1</span></div>
-  <div class="tab"        data-tab="streams"  onclick="switchTab('streams')">Streams <span class="tab-sub">sessions</span></div>
-  <!-- Thalamus sits next to Streams because it is the other half of the same
-       conversation: Streams is the streams speaking to each other, Thalamus is
+  <div class="tab"        data-tab="sessions"  onclick="switchTab('sessions')">Sessions</div>
+  <!-- Thalamus sits next to Sessions because it is the other half of the same
+       conversation: Sessions is the sessions speaking to each other, Thalamus is
        the brain speaking to them. The badge counts items still open. -->
   <div class="tab"        data-tab="thalamus" onclick="switchTab('thalamus')">Thalamus <span id="thalamus-badge" class="notif"></span></div>
   <div class="tab"        data-tab="s2"       onclick="switchTab('s2')">Graph <span class="tab-sub">S2</span></div>
   <div class="tab"        data-tab="traces"   onclick="switchTab('traces')">Traces</div>
   <div class="tab"        data-tab="logs"     onclick="switchTab('logs')">Logs <span id="logs-badge" class="notif"></span></div>
+  <!-- Config is last: it is about the brain's run conditions, not a scale.
+       The badge shows ⏸ while the brain is paused; the banner below the bar
+       says the same on every tab. -->
+  <div class="tab"        data-tab="config"   onclick="switchTab('config')">Config <span id="config-badge" class="notif"></span></div>
   <!-- ⋯ overflow — Explorer + Overview live here. The button is a tab visually
        but never gets an associated tab-content; switching to one of the
        overflow items leaves the ⋯ button in its “active” state via the
@@ -43,6 +47,11 @@
     </div>
   </div>
 </div>
+
+<!-- Pause banner — outside every tab-content so a paused brain is visible on
+     whichever tab is open. Rendered by tabs/config.js from its always-on
+     poll; empty while the brain runs or the daemon is unreachable. -->
+<div id="gate-banner"></div>
 
 <!-- ── Live tab ──────────────────────────────────────────────────────
      The session as it happens: the graph on one side, a chronological feed
@@ -95,12 +104,12 @@
            is firing so the feed stays tight. Populated by live.js
            subscribing to the `insights:tick` bus topic. -->
       <div id="insights-panel" class="insights-panel"></div>
-      <!-- Stream rail — one pill per stream of thought, each in its own hue.
-           With several streams live at once, the feed interleaves their
+      <!-- Session rail — one pill per session, each in its own hue.
+           With several sessions live at once, the feed interleaves their
            activity, so identity has to be visible rather than selected.
-           Click a pill to focus the feed on it; dormant streams collapse
+           Click a pill to focus the feed on it; dormant sessions collapse
            behind a count. Populated by live.js. -->
-      <div class="stream-rail" id="stream-rail"></div>
+      <div class="session-rail" id="session-rail"></div>
       <div class="feed feed--activity" id="feed-activity"></div>
     </div>
   </div>
@@ -224,58 +233,58 @@
   <div id="traces-content"></div>
 </div>
 
-<!-- ── Streams tab ───────────────────────────────────────────────────
+<!-- ── Sessions tab ───────────────────────────────────────────────────
      Self↔self channel observability, read as a CHAT: the conversation is the
      headline (left/top), the roster of who's talking is the rail beside it
      (which stacks under the chat on a narrow window). The log is the courier
      (self_inflight + its delivery fan-out); the composer is the dashboard's
      one write path, daemon-mediated (POST /api/self-send → daemon self_send),
-     and the operator sends attributed — never masquerading as a stream. -->
-<div id="tab-streams" class="tab-content">
-  <div class="streams-layout">
+     and the operator sends attributed — never masquerading as a session. -->
+<div id="tab-sessions" class="tab-content">
+  <div class="sessions-layout">
 
     <!-- The open conversation — oldest at top, newest at the bottom above the
          composer, the way every chat the operator already knows reads. -->
     <section class="chat-col">
       <header class="chat-head">
         <span class="chat-title" id="chat-title">💬 All messages</span>
-        <span class="chat-sub" id="chat-sub">what the streams of thought are saying to each other</span>
-        <select id="streams-hours" class="toolbar-select" onchange="loadStreams()" style="margin-left:auto">
+        <span class="chat-sub" id="chat-sub">what the sessions are saying to each other</span>
+        <select id="sessions-hours" class="toolbar-select" onchange="loadSessions()" style="margin-left:auto">
           <option value="24">24h</option>
           <option value="48" selected>48h</option>
           <option value="168">7d</option>
         </select>
-        <span id="streams-count" class="chat-count"></span>
+        <span id="sessions-count" class="chat-count"></span>
       </header>
 
-      <!-- Thread header — WHO this conversation is with: the stream's own pane
+      <!-- Thread header — WHO this conversation is with: the session's own pane
            (arc, cwd, turns, and its boot context on click). Empty for the
            All / Everyone threads, which have no single counterpart. -->
       <div class="chat-thread" id="chat-thread"></div>
 
-      <div class="chat-log" id="feed-streams-messages"></div>
+      <div class="chat-log" id="feed-sessions-messages"></div>
 
       <!-- Composer pinned at the foot of the conversation, chat-style. The
            recipient follows the open thread; the dropdown stays reachable for
            sending somewhere else without leaving the thread you're reading. -->
-      <div class="chat-composer" id="streams-compose">
-        <label class="chat-to-label" for="streams-send-to">To</label>
-        <select id="streams-send-to" class="toolbar-select" title="Recipient stream (or broadcast)">
+      <div class="chat-composer" id="sessions-compose">
+        <label class="chat-to-label" for="sessions-send-to">To</label>
+        <select id="sessions-send-to" class="toolbar-select" title="Recipient session (or broadcast)">
           <option value="broadcast">everyone (broadcast)</option>
         </select>
-        <input id="streams-send-body" type="text" class="chat-input"
-               placeholder="Say something to a stream of thought…"
-               onkeydown="onStreamsSendKey(event)">
-        <button class="btn--glass chat-send" onclick="onStreamsSend()">Send</button>
-        <span id="streams-send-status" class="chat-send-status"></span>
+        <input id="sessions-send-body" type="text" class="chat-input"
+               placeholder="Say something to a session…"
+               onkeydown="onSessionsSendKey(event)">
+        <button class="btn--glass chat-send" onclick="onSessionsSend()">Send</button>
+        <span id="sessions-send-status" class="chat-send-status"></span>
       </div>
     </section>
 
-    <!-- Conversation list — one row per stream of thought (plus Everyone, for
+    <!-- Conversation list — one row per session (plus Everyone, for
          the broadcasts, and All, the merged firehose). Liveness lives on the
          row, so this single column answers both "who is live" and "who is
          talking to whom". -->
-    <aside class="streams-rail">
+    <aside class="sessions-rail">
       <div class="conv-list" id="conv-list"></div>
     </aside>
 
@@ -283,7 +292,7 @@
 </div>
 
 <!-- ── Thalamus tab ──────────────────────────────────────────────────
-     The brain's standing-intent queue — the other direction of the Streams
+     The brain's standing-intent queue — the other direction of the Sessions
      conversation. An item is an ask, a reminder or a notice; it lives until
      it is answered, dismissed or expires, and the ledger under each card says
      which sessions actually saw it, and at which moment (boot / stop). -->
@@ -302,6 +311,16 @@
     <span id="thalamus-count" class="thal-count"></span>
   </div>
   <div class="feed" id="feed-thalamus"></div>
+</div>
+
+<!-- ── Config tab ────────────────────────────────────────────────────
+     The brain's run conditions: which brain the daemon writes (against the
+     one this dashboard reads), the pause switch, what the brain does not
+     record (ignored projects, with each live session's verdict), and whether
+     the API key is set. The one rule shown runs in the daemon; the dashboard
+     copies none. -->
+<div id="tab-config" class="tab-content">
+  <div class="cfg-grid" id="config-root"></div>
 </div>
 
 <!-- Main app — type=module enables ES imports, no build step needed. -->

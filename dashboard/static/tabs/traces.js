@@ -14,6 +14,7 @@ import { SCALE_COLORS } from '/static/lib/scales.js';
 import { reapplyTraceFlashIfPending, loadNodeDetail } from '/static/lib/node_detail.js';
 import { renderTraceDetail, collapsedBadges, isMergeableRefType, groupSummary } from '/static/lib/trace_detail.js';
 import { renderFriendlyChain } from '/static/lib/trace_friendly.js';
+import { sessionShort } from '/static/lib/sessions.js';
 
 let _traceChainEntries = [];
 let _traceRendered = 0;
@@ -116,12 +117,13 @@ export async function loadTraces(opts = {}) {
     try {
       const sessions = await api.sessions();
       // Note: not `opts` — that's the function parameter (opts.force/.session).
-      // Sessions read by their handle (worktree / branch tail), never raw
-      // hex — resolved once server-side in queries/sessions.py so the Traces
-      // dropdown, the stream rail, and activity cards all say the same name.
+      // Sessions read by their handle (worktree / branch tail), resolved once
+      // server-side in queries/sessions.py so the Traces dropdown, the session
+      // rail, and activity cards all say the same name; a session with no
+      // handle reads by its short.
       const optsHtml = '<option value="">All sessions</option>' + sessions.map(s =>
         '<option value="' + s.id + '"' + (s.id === sessionFilter ? ' selected' : '') + '>'
-        + escapeHtml(s.handle || s.short) + ' · ' + s.events + ' events</option>'
+        + escapeHtml(s.handle || sessionShort(s.id)) + ' · ' + s.events + ' events</option>'
       ).join('');
       sessSelect.innerHTML = optsHtml;
     } catch(e) { /* keep existing options */ }
@@ -302,7 +304,7 @@ function _renderTracesBatch(el) {
     const color = SCALE_COLORS[chainScale] || '#666';
     const label = _traceChainLabel(chainId);
     const sessionId = events[0].session_id || '';
-    const sessionTag = sessionId ? '<span style="color:#444;font-size:9px;margin-left:6px">' + sessionId.substring(0,8) + '</span>' : '';
+    const sessionTag = sessionId ? '<span style="color:#444;font-size:9px;margin-left:6px">' + sessionShort(sessionId) + '</span>' : '';
     // Identity per chain: first event with non-empty identity wins. Chains
     // often span multiple writes from the same speaker pair so one rendering
     // per chain is enough; a per-event chip would just repeat ad nauseam.

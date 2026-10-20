@@ -4,7 +4,7 @@ Covers the core contracts:
 - file(): routing (queue vs live delegation), defaults by kind, dedup upsert,
   never refused for volume, when/for_whom resolution errors.
 - pull(): the delivery predicate (due/window/audience/target/ledger),
-  asks-at-boot-only, push-once-per-session idempotence, once vs all.
+  asks-at-first-prompt-only, push-once-per-session idempotence, once vs all.
 - resolve(): answer / defer (re-arm) / dismiss, exactly-one-action guard.
 - withdraw(): source-scoped producer retraction.
 - expire_due(): window sweep; an unanswered ask dies LOUDLY (dead-letter).
@@ -117,7 +117,7 @@ class TestFile(ThalamusBase):
         self.assertFalse(self._file('  ')['ok'])
 
     def test_directed_ask_files_and_targets(self):
-        # A nameable session has already booted, so a directed ask is only
+        # A nameable session has already had its first prompt, so a directed ask is only
         # deliverable because its moment is Stop (TestPull pins the moment).
         r = self._file('judge this?', needs_answer=True, for_whom=S1)
         self.assertTrue(r['ok'])
@@ -305,6 +305,15 @@ class TestFile(ThalamusBase):
         self.assertFalse(r['ok'])
         self.assertIn('session', r['error'])
 
+    def test_live_now_over_the_courier_limit_is_rejected(self):
+        # The live route rides the courier, whose door refuses an over-limit
+        # body; the Thalamus door hands that back as its own rejection.
+        from servers.channels.self_channel import self_contract
+        r = self._file('x' * (self_contract.SIGNAL_BODY_MAX + 1),
+                       for_whom='live', session_id=S1)
+        self.assertFalse(r['ok'])
+        self.assertIn('the limit is', r['error'])
+
     def test_live_now_delegates_to_courier_and_goes_terminal(self):
         r = self._file('main moved — rebase', for_whom='live', session_id=S1)
         self.assertTrue(r['ok'])
@@ -363,11 +372,11 @@ class TestPull(ThalamusBase):
 
     def test_push_once_per_session_is_ledger_idempotent(self):
         self._file('standing note', for_whom='all')
-        _, n1 = thalamus.pull(self.brain, S1, via='boot')
+        _, n1 = thalamus.pull(self.brain, S1, via='prompt')
         _, n2 = thalamus.pull(self.brain, S1, via='stop')
         self.assertEqual((n1, n2), (1, 0))
         # A DIFFERENT session still gets its copy.
-        _, n3 = thalamus.pull(self.brain, S2, via='boot')
+        _, n3 = thalamus.pull(self.brain, S2, via='prompt')
         self.assertEqual(n3, 1)
 
     def test_cap_rotates_fewest_delivered_first(self):
@@ -377,11 +386,11 @@ class TestPull(ThalamusBase):
         cap rotate: the items a first session did not get lead the next."""
         ids = [self._file('ask %d' % i, needs_answer=True)['id']
                for i in range(tc.PULL_MAX_ITEMS + 2)]
-        block1, n1 = thalamus.pull(self.brain, S1, via='boot')
+        block1, n1 = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n1, tc.PULL_MAX_ITEMS)
         starved = [i for i in ids if i not in block1]
         self.assertEqual(len(starved), 2)
-        block2, n2 = thalamus.pull(self.brain, S2, via='boot')
+        block2, n2 = thalamus.pull(self.brain, S2, via='prompt')
         self.assertEqual(n2, tc.PULL_MAX_ITEMS)
         for i in starved:
             self.assertIn(i, block2)
@@ -395,9 +404,9 @@ class TestPull(ThalamusBase):
         ask = self._file('decide X?', needs_answer=True, dedup_key='k')
         note = self._file('standing note', for_whom='all', source='other')
         for k in range(tc.MAX_DELIVERIES_PER_ITEM):
-            _, n = thalamus.pull(self.brain, 'sess-%02d' % k, via='boot')
+            _, n = thalamus.pull(self.brain, 'sess-%02d' % k, via='prompt')
             self.assertEqual(n, 2, k)
-        block, n = thalamus.pull(self.brain, 'sess-late', via='boot')
+        block, n = thalamus.pull(self.brain, 'sess-late', via='prompt')
         self.assertEqual((block, n), ('', 0))
         self._age_deliveries()
         before = len(self._dead_letters())
@@ -420,7 +429,7 @@ class TestPull(ThalamusBase):
         window end has no reader, saturation always does."""
         r = self._file('decide X?', needs_answer=True)
         for k in range(tc.MAX_DELIVERIES_PER_ITEM):
-            thalamus.pull(self.brain, 'sess-%02d' % k, via='boot')
+            thalamus.pull(self.brain, 'sess-%02d' % k, via='prompt')
         self.assertEqual(thalamus.expire_due(self.brain), 0)
         self.assertEqual(self._row(r['id'])[0], tc.STATE_OPEN)
         out = thalamus.resolve(self.brain, r['id'], answer='here it is')
@@ -534,7 +543,7 @@ class TestPull(ThalamusBase):
         drift = self._file('question, run 0', needs_answer=True, dedup_key='d')
         seen = 0
         for k in range(cap * 2):
-            block, _ = thalamus.pull(self.brain, 'sess-%02d' % k, via='boot')
+            block, _ = thalamus.pull(self.brain, 'sess-%02d' % k, via='prompt')
             seen += drift['id'] in block
             self._file('question, run %d' % (k + 1), needs_answer=True,
                        dedup_key='d')
@@ -549,7 +558,7 @@ class TestPull(ThalamusBase):
         while it sat scheduled for next week."""
         r = self._file('decide X?', needs_answer=True, dedup_key='k')
         for k in range(tc.MAX_DELIVERIES_PER_ITEM):
-            thalamus.pull(self.brain, 'sess-%02d' % k, via='boot')
+            thalamus.pull(self.brain, 'sess-%02d' % k, via='prompt')
         self.assertTrue(thalamus.resolve(self.brain, r['id'],
                                          defer_until='1w')['ok'])
         self._age_deliveries()
@@ -562,7 +571,7 @@ class TestPull(ThalamusBase):
                 'UPDATE thalamus_items SET deliver_at = ? WHERE id = ?',
                 (iso_cutoff(hours=1), r['id']))
             self.brain.logs_conn_w.commit()
-        _, n = thalamus.pull(self.brain, 'sess-next-week', via='boot')
+        _, n = thalamus.pull(self.brain, 'sess-next-week', via='prompt')
         self.assertEqual(n, 1)
 
     def test_a_directed_asks_fate_carries_its_delivery_count(self):
@@ -584,7 +593,7 @@ class TestPull(ThalamusBase):
     def test_a_window_end_notice_closes_quietly(self):
         """Only the CAP warns for an item that asked nothing. A notice
         reaching its window end is a natural death and must stay silent, or
-        every routine expiry becomes an error row at every session's boot."""
+        every routine expiry becomes an error row at every session's first prompt."""
         r = self._file('standing note', for_whom='all')
         thalamus.pull(self.brain, S1, via='stop')
         self._age_out(r['id'])
@@ -601,18 +610,18 @@ class TestPull(ThalamusBase):
         cap = tc.MAX_DELIVERIES_PER_ITEM
         r = self._file('decide X?', needs_answer=True, dedup_key='k')
         for k in range(cap):
-            thalamus.pull(self.brain, 'sess-%02d' % k, via='boot')
-        _, n = thalamus.pull(self.brain, 'sess-late', via='boot')
+            thalamus.pull(self.brain, 'sess-%02d' % k, via='prompt')
+        _, n = thalamus.pull(self.brain, 'sess-late', via='prompt')
         self.assertEqual(n, 0, 'should be saturated at the cap')
         # a body-only re-file re-arms delivery but does NOT renew the budget
         self._file('decide X, sharper?', needs_answer=True, dedup_key='k')
-        _, n = thalamus.pull(self.brain, 'sess-late2', via='boot')
+        _, n = thalamus.pull(self.brain, 'sess-late2', via='prompt')
         self.assertEqual(n, 0, 'a body change must not buy a fresh budget')
         # one carrying a new `when` moves the date the budget counts from
         again = self._file('decide X, sharper?', needs_answer=True,
                            dedup_key='k', when=iso_now())
         self.assertEqual(again['id'], r['id'])
-        _, n = thalamus.pull(self.brain, 'sess-late3', via='boot')
+        _, n = thalamus.pull(self.brain, 'sess-late3', via='prompt')
         self.assertEqual(n, 1, 'a new `when` resets the budget baseline')
 
     def test_the_reask_cooloff_binds_questions_not_rearming_notices(self):
@@ -661,21 +670,21 @@ class TestPull(ThalamusBase):
                     if i['id'] == r['id'])
         self.assertEqual(item['refs'], ['d4ed89c5'])
 
-    def test_broadcast_ask_boot_only(self):
+    def test_broadcast_ask_first_prompt_only(self):
         r = self._file('decide X?', needs_answer=True)
         _, n_stop = thalamus.pull(self.brain, S1, via='stop')
         self.assertEqual(n_stop, 0)
-        block, n_boot = thalamus.pull(self.brain, S1, via='boot')
-        self.assertEqual(n_boot, 1)
+        block, n_prompt = thalamus.pull(self.brain, S1, via='prompt')
+        self.assertEqual(n_prompt, 1)
         self.assertIn('thalamus_resolve("%s"' % r['id'], block)
 
     def test_directed_ask_stop_only_and_only_its_target(self):
-        """The Scribe asking the session it just encoded: Stop, not boot
-        (the named session has already had its boot), and never another
+        """The Scribe asking the session it just encoded: Stop, not prompt
+        (the named session has already had its first prompt), and never another
         session."""
         r = self._file('revise, or leave?', needs_answer=True, for_whom=S1)
-        _, n_boot = thalamus.pull(self.brain, S1, via='boot')
-        self.assertEqual(n_boot, 0)
+        _, n_prompt = thalamus.pull(self.brain, S1, via='prompt')
+        self.assertEqual(n_prompt, 0)
         _, n_other = thalamus.pull(self.brain, S2, via='stop')
         self.assertEqual(n_other, 0)
         block, n_stop = thalamus.pull(self.brain, S1, via='stop')
@@ -684,14 +693,14 @@ class TestPull(ThalamusBase):
 
     def test_future_deliver_at_not_due_yet(self):
         self._file('later', when='1w')
-        _, n = thalamus.pull(self.brain, S1, via='boot')
+        _, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, 0)
 
     def test_directed_reaches_only_its_target(self):
         self._file('for one stream', for_whom=S1)
-        _, n_other = thalamus.pull(self.brain, S2, via='boot')
+        _, n_other = thalamus.pull(self.brain, S2, via='prompt')
         self.assertEqual(n_other, 0)
-        _, n_target = thalamus.pull(self.brain, S1, via='boot')
+        _, n_target = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n_target, 1)
 
     def test_ledger_records_via_and_session(self):
@@ -704,12 +713,12 @@ class TestPull(ThalamusBase):
 
     def test_empty_session_is_noop(self):
         self._file('note')
-        self.assertEqual(thalamus.pull(self.brain, '', via='boot'), ('', 0))
+        self.assertEqual(thalamus.pull(self.brain, '', via='prompt'), ('', 0))
 
     def test_overflow_names_the_true_count(self):
         for i in range(tc.PULL_MAX_ITEMS + 4):
             self._file('item %d' % i, source='src-%d' % i)  # distinct budgets
-        block, n = thalamus.pull(self.brain, S1, via='boot')
+        block, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, tc.PULL_MAX_ITEMS)
         self.assertIn('(+4 more due', block)  # the real number, not "+1"
 
@@ -867,7 +876,7 @@ class TestExpiry(ThalamusBase):
     def test_expired_never_delivers(self):
         r = self._file('too late')
         self._age_out(r['id'])
-        _, n = thalamus.pull(self.brain, S1, via='boot')
+        _, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, 0)
 
 
@@ -908,7 +917,7 @@ class TestVocabulary(ThalamusBase):
                     'resolve_for_whom(%r, %r) -> %r escaped the closed set'
                     % (fw, na, audience))
         _, params = thalamus._due_filter(
-            S1, 'boot', '2027-01-01T00:00:00+00:00',
+            S1, tc.VIA_PROMPT, '2027-01-01T00:00:00+00:00',
             tc.MAX_DELIVERIES_PER_ITEM)
         for member in tc.AUDIENCES:
             self.assertIn(member, params,
@@ -948,17 +957,17 @@ class TestVocabulary(ThalamusBase):
                          tc.KIND_REMINDER)
         self.assertEqual(tc.kind_of({}), tc.KIND_NOTICE)
         # Both partitions read the same derivation.
-        self.assertEqual(set(tc.KIND_VERB), set(tc.KIND_EXPIRES_DAYS))
+        self.assertEqual(set(tc.KIND_LEAD), set(tc.KIND_EXPIRES_DAYS))
         # window_for anchors a dated item's span at its due date.
         due = '2027-01-01T00:00:00+00:00'
         self.assertGreater(tc.window_for(False, due), due)
 
-    def test_kind_verbs_render(self):
+    def test_kind_leads_render(self):
         self._file('decide?', needs_answer=True)
         self._file('fyi', source='s3')
-        block, _ = thalamus.pull(self.brain, S1, via='boot')
-        self.assertIn('asks', block)
-        self.assertIn('notes', block)
+        block, _ = thalamus.pull(self.brain, S1, via='prompt')
+        self.assertIn('I need to help my', block)
+        self.assertIn('My s3 noticed: fyi', block)
 
 
 class TestMaintenanceSweep(ThalamusBase):
@@ -1000,7 +1009,7 @@ class TestRefs(ThalamusBase):
         self._file('note two', refs=[a], source='other')
         with mock.patch.object(self.brain, 'filter_nodes',
                                wraps=self.brain.filter_nodes) as fn:
-            block, n = thalamus.pull(self.brain, S1, via='boot')
+            block, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, 2)
         self.assertEqual(fn.call_count, 1)  # batched: one call for the block
         self.assertIn('first ref title', block)
@@ -1014,14 +1023,14 @@ class TestRefs(ThalamusBase):
                        'client secret plan')
         _set_scopes(self.brain, ISOLATE_CLIENT_X)
         self._file('global note', refs=[walled])
-        block, n = thalamus.pull(self.brain, S1, via='boot')
+        block, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, 1)
         self.assertNotIn('client secret plan', block)
         self.assertIn(walled[:8], block)  # the ref itself renders bare
 
     def test_bad_ref_renders_bare(self):
         self._file('note', refs=['deadbeef'])
-        block, n = thalamus.pull(self.brain, S1, via='boot')
+        block, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertEqual(n, 1)
         self.assertIn('deadbeef', block)
 
@@ -1030,7 +1039,7 @@ class TestRender(ThalamusBase):
 
     def test_long_body_truncates_loudly(self):
         r = self._file('x' * (tc.BODY_MAX + 500))
-        block, _ = thalamus.pull(self.brain, S1, via='boot')
+        block, _ = thalamus.pull(self.brain, S1, via='prompt')
         self.assertIn('chars', block)          # the loud marker, not a bare cut
         self.assertIn('thalamus_list', block)  # points at the full text
         self.assertLess(len(block), tc.BLOCK_MAX + 500)
@@ -1040,7 +1049,7 @@ class TestRender(ThalamusBase):
         item was never delivered and stays armed for the next moment."""
         for i in range(4):
             self._file('x' * 1400, source='src-%d' % i)  # distinct budgets
-        _, n1 = thalamus.pull(self.brain, S1, via='boot')
+        _, n1 = thalamus.pull(self.brain, S1, via='prompt')
         self.assertLess(n1, 4)  # the block cap dropped at least one
         ledgered = self.brain.logs_conn.execute(
             'SELECT COUNT(*) FROM thalamus_deliveries').fetchone()[0]
@@ -1053,25 +1062,44 @@ class TestRender(ThalamusBase):
         must not claim fetched items the cap dropped."""
         for i in range(4):
             self._file('x' * 1400, source='src-%d' % i)
-        block, n = thalamus.pull(self.brain, S1, via='boot')
+        block, n = thalamus.pull(self.brain, S1, via='prompt')
         self.assertLess(n, 4)
-        self.assertIn('— %d item(s)' % n, block)
+        self.assertTrue(block.startswith('📝 notes to self (%d)' % n))
         self.assertIn('(+%d more due' % (4 - n), block)
 
-    def test_block_head_carries_relay_note(self):
-        """The reader's standing instruction sits between the head and the
-        first item — plain words to the operator, never id/moment/producer —
-        and names the read routes; it is reserved from the budget."""
+    def test_block_head_is_note_to_self(self):
+        """The head is a note to self; my standing instruction sits between
+        it and the first item — handle it, ask the counterpart only for
+        help — and names the read routes; it is reserved from the budget."""
         self._file('note')
-        block, _ = thalamus.pull(self.brain, S1, via='boot')
+        block, _ = thalamus.pull(self.brain, S1, via='prompt')
         head, rest = block.split('\n', 1)
-        self.assertIn('— 1 item(s)', head)
-        self.assertTrue(rest.startswith(tc._HEAD_NOTE + '\n\n• th_'))
-        for phrase in ('plain words', 'never the id, the moment, or the producer',
+        self.assertEqual(head, '📝 note to self')
+        note = tc._HEAD_NOTE % (self.brain.counterpart_for(S1) or 'my operator')
+        self.assertTrue(rest.startswith(note + '\n\n• th_'))
+        for phrase in ('If I need help I should ask', 'handle it',
                        'thalamus_list', "recall_episodes(ref_type='thalamus_delivery')",
                        'thalamus_resolve'):
             self.assertIn(phrase, tc._HEAD_NOTE)
         self.assertLessEqual(len(block), tc.BLOCK_MAX)
+
+    def test_item_speaks_as_my_part(self):
+        """An item renders by id, then the note as my own: a part of me
+        leads it ('I need to help my healer:'), no producer label; my own
+        notes carry no lead; the Scribe's model-named source maps to its
+        part."""
+        ask = tc.render_item({'id': 'th_1', 'source': 's2:healer',
+                              'needs_answer': True, 'body': 'b'})
+        self.assertTrue(ask.startswith('• th_1\n  I need to help my healer: b'))
+        self.assertNotIn('s2:healer', ask)
+        scribe = tc.render_item({'id': 'th_2', 'source': 'encoder:sonnet',
+                                 'body': 'b'})
+        self.assertIn('  My scribe noticed: b', scribe)
+        mine = tc.render_item({'id': 'th_3', 'source': tc.INTERACTIVE_SOURCE,
+                               'body': 'b'})
+        self.assertIn('• th_3\n  b\n', mine)
+        self.assertEqual(tc.part_of('s2:community_detection'),
+                         'community detection')
 
     def test_list_items_filters_by_source_and_target(self):
         """The producer's own-items read behind the journal continuity
@@ -1163,7 +1191,7 @@ class TestRender(ThalamusBase):
 
     def test_list_items_shows_delivery_counts(self):
         r = self._file('note')
-        thalamus.pull(self.brain, S1, via='boot')
+        thalamus.pull(self.brain, S1, via='prompt')
         out = thalamus.list_items(self.brain)
         item = next(i for i in out['items'] if i['id'] == r['id'])
         self.assertEqual(item['deliveries'], 1)

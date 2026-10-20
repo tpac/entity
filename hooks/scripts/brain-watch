@@ -14,9 +14,9 @@
 #
 # session_id defaults to $CLAUDE_CODE_SESSION_ID — the full session UUID Claude
 # Code exports into every command's environment — so `brain-watch` with NO args
-# watches THIS session. The boot banner's MY_STREAM_ID scrolls out of context in
+# watches THIS session. The boot banner's MY_SESSION_ID scrolls out of context in
 # a long session; the env var never does. Pass an explicit id only to watch a
-# DIFFERENT stream's inbox.
+# DIFFERENT session's inbox.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # brain-env.sh (sibling) sets $BRAIN_PYTHON + $PLUGIN_DIR and bootstraps the runtime.

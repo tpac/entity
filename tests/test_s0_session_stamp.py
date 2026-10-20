@@ -13,6 +13,7 @@ Held in step here:
     session mirrors the LATEST value while each row keeps its own
   • the dispatched trace_append door stamps S0 rows from the session env
   • a Stop without a model is loud (errors table), never blocking
+  • a dialogue row (user/assistant) written with no text is loud, never blocking
   • presence peek / _empty_peek / session_env_for expose the fields
   • the dashboard's literal mirror of the field list matches the contract and
     query_traces / query_recent_sessions promote every field top-level
@@ -32,7 +33,8 @@ _HOOKS_DIR = os.path.join(os.path.dirname(__file__), '..', 'hooks', 'scripts')
 sys.path.insert(0, _HOOKS_DIR)
 
 from tests.brain_test_base import BrainTestBase
-from servers.trace_contract import S0_SESSION_STAMP_FIELDS
+from servers.trace_contract import session_short
+from servers.trace_contract import S0_SESSION_STAMP_FIELDS, READER_STAMP_FIELDS
 from servers.session_context import SessionContext
 from servers.brain_traces import _s0_trace, stamp_s0_session
 from servers.daemon_hooks import (
@@ -148,6 +150,51 @@ class S0WriteDoorTest(BrainTestBase):
                          'claude-opus-5')                          # latest mirrored
         self.assertEqual(self.brain.session_env_for(sid)['host'], 'claude-code')
 
+    def test_prompt_rows_carry_the_hosts_turn(self):
+        # Every row of one prompt carries the host's name for its turn. A
+        # message absorbed mid-turn shares it with the prompt that opened the
+        # turn: the conversation reader hands it to the turn rule, and the
+        # encode cadence counts the two as one turn. A client that sends no
+        # turn writes no key, and its row counts on its own.
+        from servers.trace_contract import HOST_TURN_FIELD
+        sid = 'host-turn'
+        base = {"session_id": sid, "register_only": True, "model": "m",
+                "tells": ["CLAUDE_CODE_SESSION_ID"]}
+        hook_recall(self.brain, dict(base, prompt="look into the grouping", pieces=[
+            ['operator', 'look into the grouping', ''],
+            ['harness', 'You are in a worktree.', '<system-reminder>']],
+            **{HOST_TURN_FIELD: 'p1'}), [])
+        hook_recall(self.brain, dict(base, prompt="also the Surface window",
+                                     **{HOST_TURN_FIELD: 'p1'}), [])
+        hook_recall(self.brain, dict(base, prompt="an old client"), [])
+        self.assertEqual([m.get(HOST_TURN_FIELD) for m in _s0_meta(self.brain, sid, 'user_message')],
+                         ['p1', 'p1', None])
+        self.assertEqual([m.get(HOST_TURN_FIELD) for m in _s0_meta(self.brain, sid, 'env_message')],
+                         ['p1'])
+        conv = self.brain.get_conversation(sid, with_judge_output=False)
+        self.assertEqual([(t['ref_type'], t[HOST_TURN_FIELD]) for t in conv],
+                         [('user_message', 'p1'), ('env_message', 'p1'),
+                          ('user_message', 'p1'), ('user_message', '')])
+        self.assertEqual(self.brain._trace_dal.conversational_turns_since(sid), 2)
+        # After a Stop the host may still name the same turn (a Stop-hook
+        # continuation); the Stop closed it, so a row on the next chain is a
+        # turn of its own, as the turn rule groups it.
+        self.brain.get_or_create_session(sid).increment_stop()
+        hook_recall(self.brain, dict(base, prompt="and the backfill too",
+                                     **{HOST_TURN_FIELD: 'p1'}), [])
+        self.assertEqual(self.brain._trace_dal.conversational_turns_since(sid), 3)
+
+    def test_a_malformed_host_turn_is_loud_and_not_stamped(self):
+        from servers.trace_contract import HOST_TURN_FIELD
+        sid = 'host-turn-bad'
+        with mock.patch.object(self.brain, '_log_warning') as warn:
+            hook_recall(self.brain, {"session_id": sid, "register_only": True,
+                                     "prompt": "look into it", "model": "m",
+                                     "tells": ["CLAUDE_CODE_SESSION_ID"],
+                                     HOST_TURN_FIELD: 7}, [])
+        self.assertIn('host_turn_malformed', [c.args[0] for c in warn.call_args_list])
+        self.assertNotIn(HOST_TURN_FIELD, _s0_meta(self.brain, sid, 'user_message')[0])
+
     def test_post_response_common_stamps_assistant_message(self):
         sid = 'stamp-stop'
         ctx = self.brain.get_or_create_session(sid)
@@ -156,6 +203,20 @@ class S0WriteDoorTest(BrainTestBase):
                              model='gpt-6-astra', tells=['PLUGIN_DATA'])
         meta = _s0_meta(self.brain, sid, 'assistant_message')[-1]
         self.assertEqual((meta['model'], meta['host']), ('gpt-6-astra', 'codex'))
+
+    def test_stop_carries_the_reply_readers_stamp(self):
+        # The contract identity that read the reply rides the row, as on
+        # prompt rows; a client that predates the reader sends none.
+        for sid, stamp in (('reader-stamped', {'vocab_version': 2, 'impl_identity': 'abc123'}),
+                           ('reader-old-client', {})):
+            ctx = self.brain.get_or_create_session(sid)
+            ctx.last_recall_stop = ctx.stop_counter
+            hook_post_response_track(self.brain, dict({
+                "session_id": sid, "hook_event_name": "Stop", "model": "m",
+                "last_assistant_message": "a reply"}, **stamp), [])
+            meta = _s0_meta(self.brain, sid, 'assistant_message')[-1]
+            self.assertEqual(meta['content'], 'a reply')
+            self.assertEqual({k: meta[k] for k in READER_STAMP_FIELDS if k in meta}, stamp)
 
     def test_eval_harness_call_without_stamp_keeps_known_value(self):
         sid = 'stamp-keep'
@@ -213,30 +274,52 @@ class S0WriteDoorTest(BrainTestBase):
         self.assertEqual(len(self._error_rows('s0_model_unset')), before + 1)
 
     def test_loud_check_is_per_session_not_deduped_across_streams(self):
-        # The error dedup fingerprint is source:type:message — a message that
-        # names the session keeps one stream's gap from masking another's.
+        # The error dedup fingerprint includes the message — naming the session
+        # keeps one stream's gap from masking another's. Codex ids opened in
+        # the same minute share their first 8 chars (UUIDv7 timestamp), so the
+        # message must carry the session's tail (session_short).
         before = len(self._error_rows('s0_model_unset'))
-        # ids differ within the 8-char short the message carries
-        for sid in ('loudA-stamp', 'loudB-stamp'):
+        sids = ('01a122b6-9059-7ca1-bb1b-a5e6ff4ce0cf',
+                '01a122b6-f3c2-7d10-8e4a-17c09b2d5e61')
+        for sid in sids:
             hook_post_response_track(self.brain, {
                 "session_id": sid, "hook_event_name": "Stop",
                 "last_assistant_message": "r"}, [])
         self.assertEqual(len(self._error_rows('s0_model_unset')), before + 2)
         # the SAME stream again inside the dedup window is collapsed
         hook_post_response_track(self.brain, {
-            "session_id": 'loudA-stamp', "hook_event_name": "Stop",
+            "session_id": sids[0], "hook_event_name": "Stop",
             "last_assistant_message": "r"}, [])
         self.assertEqual(len(self._error_rows('s0_model_unset')), before + 2)
+
+    def test_empty_dialogue_row_is_loud_not_blocking(self):
+        # A turn ending on a tool call hands Stop an empty
+        # last_assistant_message; the row still lands, and the gap is logged.
+        before = len(self._error_rows('s0_dialogue_empty'))
+        for i, (event_type, ref_type) in enumerate(
+                (('delta', 'assistant_message'), ('K', 'user_message'))):
+            ctx = self.brain.get_or_create_session('dialogue-empty-%d' % i)
+            tid = _s0_trace(self.brain, ctx, event_type=event_type,
+                            ref_type=ref_type, summary='', content='  ')
+            self.assertTrue(tid)
+        self.assertEqual(len(self._error_rows('s0_dialogue_empty')), before + 2)
+        # text, or a row off the dialogue axis: silent
+        ctx = self.brain.get_or_create_session('dialogue-full')
+        _s0_trace(self.brain, ctx, event_type='delta',
+                  ref_type='assistant_message', summary='r', content='r')
+        _s0_trace(self.brain, ctx, event_type='K', ref_type='heartbeat',
+                  summary='wakeup re-arm')
+        self.assertEqual(len(self._error_rows('s0_dialogue_empty')), before + 2)
 
 
 class PresenceStampTest(BrainTestBase):
     needs_embedder = False
 
     def test_peek_and_empty_peek_carry_every_field(self):
-        ctx = SessionContext(session_id='streamMDL0')
+        ctx = SessionContext(session_id='sessionMDL0')
         ctx.set_env(model='gpt-6-astra', host='codex')
         ctx.save(self.brain._session_state)
-        p = presence.peek(self.brain, 'streamMDL0')
+        p = presence.peek(self.brain, 'sessionMDL0')
         self.assertEqual((p['model'], p['host']), ('gpt-6-astra', 'codex'))
         empty = presence.peek(self.brain, '')
         for f in S0_SESSION_STAMP_FIELDS:
@@ -245,15 +328,15 @@ class PresenceStampTest(BrainTestBase):
             self.assertIn(f, self.brain.session_env_for('no-such'))
 
     def test_rich_presence_forwards_model(self):
-        sid = 'streamMDL1'
+        sid = 'sessionMDL1'
         self.brain._trace_dal.append(
-            chain_id='s0-%s-0' % sid[:8], scale='s0', event_type='K',
+            chain_id='s0-%s-0' % session_short(sid), scale='s0', event_type='K',
             ref_type='user_message', summary='model work', session_id=sid)
         ctx = SessionContext(session_id=sid)
         ctx.set_env(model='claude-fable-5-1', host='claude-code')
         ctx.save(self.brain._session_state)
         out = presence.build_presence(self.brain, my_session_id='other', limit=10, rich=True)
-        entry = next(s for s in out['streams'] if s['session_id'] == sid)
+        entry = next(s for s in out['sessions'] if s['session_id'] == sid)
         self.assertEqual((entry['model'], entry['host']), ('claude-fable-5-1', 'claude-code'))
 
 
@@ -388,6 +471,55 @@ class HookSourceTest(unittest.TestCase):
                    {'type': 'assistant', 'message': {'model': 'claude-opus-5'}, 'isSidechain': True}]
         path = self._transcript(entries)
         self.assertEqual(self.hc.turn_model({'transcript_path': path}), 'claude-fable-5-1')
+
+    def _box(self, recap):
+        return {'type': 'tool_use', 'name': 'mcp__ccd_turn__wrap_up', 'input': {'recap': recap}}
+
+    def test_closing_message_is_every_block_of_the_last_main_thread_message(self):
+        # The host writes one entry per content block; the closing message is
+        # the run of main-thread entries sharing the last message.id.
+        path = self._transcript([
+            {'type': 'assistant', 'message': {'id': 'm1', 'model': 'claude-opus-5-5',
+                                              'content': [self._box('an earlier turn')]}},
+            {'type': 'user', 'message': {'content': 'next'}},
+            {'type': 'assistant', 'message': {'id': 'm2', 'model': 'claude-opus-5-5',
+                                              'content': [{'type': 'thinking', 'thinking': 'x'}]}},
+            {'type': 'assistant', 'message': {'id': 'm2', 'model': 'claude-opus-5-5', 'content': [
+                {'type': 'tool_use', 'name': 'mcp__ccd_turn__update_plan', 'input': {'advance': True}}]}},
+            {'type': 'assistant', 'message': {'id': 'm2', 'model': 'claude-opus-5-5',
+                                              'content': [self._box('this turn')]}},
+            {'type': 'assistant', 'message': {'id': 's1', 'model': 'claude-haiku-5-5',
+                                              'content': [self._box('a subagent')]},
+             'isSidechain': True},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'ok'}]}},
+        ])
+        self.assertEqual(self.hc.closing_message({'transcript_path': path}), {
+            'model': 'claude-opus-5-5',
+            'tool_calls': [('mcp__ccd_turn__update_plan', {'advance': True}),
+                           ('mcp__ccd_turn__wrap_up', {'recap': 'this turn'})]})
+
+    def test_text_after_the_box_closes_the_turn_without_it(self):
+        path = self._transcript([
+            {'type': 'assistant', 'message': {'id': 'm1', 'content': [self._box('box')]}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'ok'}]}},
+            {'type': 'assistant', 'message': {'id': 'm2', 'model': 'claude-opus-5-5',
+                                              'content': [{'type': 'text', 'text': 'Closing.'}]}},
+        ])
+        self.assertEqual(self.hc.closing_message({'transcript_path': path}),
+                         {'model': 'claude-opus-5-5', 'tool_calls': []})
+
+    def test_closing_message_without_ids_or_assistant(self):
+        # No message.id: only the last entry is the closing message.
+        path = self._transcript([
+            {'type': 'assistant', 'message': {'model': 'm', 'content': [self._box('older')]}},
+            {'type': 'assistant', 'message': {'content': [self._box('last')]}},
+        ])
+        self.assertEqual(self.hc.closing_message({'transcript_path': path}), {
+            'model': 'm', 'tool_calls': [('mcp__ccd_turn__wrap_up', {'recap': 'last'})]})
+        path = self._transcript([{'type': 'user', 'message': {'content': 'first prompt'}}])
+        self.assertIsNone(self.hc.closing_message({'transcript_path': path}))
+        self.assertIsNone(self.hc.closing_message({'transcript_path': '/nope/none.jsonl'}))
+        self.assertIsNone(self.hc.closing_message({}))
 
 
 if __name__ == '__main__':

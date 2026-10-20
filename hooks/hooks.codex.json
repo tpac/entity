@@ -1,5 +1,5 @@
 {
-  "description": "Brain plugin hooks for the Codex host: boot, recall, turn recording, safety, lifecycle. Same scripts as hooks.json; only the event set and per-host handler fields differ (tests/test_hooks_manifest_sync.py holds the two in step).",
+  "description": "Brain plugin hooks for the Codex host: boot, recall, turn recording, lifecycle. Same scripts as hooks.json; only the event set and per-host handler fields differ (tests/test_hooks_manifest_sync.py holds the two in step).",
   "hooks": {
     "SessionStart": [
       {
@@ -36,16 +36,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-edit-suggest.sh\"",
-            "timeout": 8
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-bash-safety.sh\"",
             "timeout": 8
           }
         ]

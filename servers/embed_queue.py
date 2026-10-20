@@ -21,7 +21,7 @@ import time
 from typing import Dict, Optional, Set
 
 from .clock import iso_cutoff
-from .trace_contract import CONVERSATIONAL_REF_TYPES
+from .trace_contract import CONVERSATIONAL_REF_TYPES, INCOMING_SPEAKERS
 
 # Drain every N seconds if queue is non-empty. Empty queue = no-op, no work.
 EMBED_DRAIN_INTERVAL = 5.0
@@ -540,6 +540,8 @@ def _render_trace_for_embedding(row: Dict) -> str:
     content = meta.get('content') or row.get('summary') or ''
     if ref_type == 'user_message':
         return '%s: %s' % (human, content)
+    if ref_type in INCOMING_SPEAKERS:
+        return '%s: %s' % (INCOMING_SPEAKERS[ref_type].upper(), content)
     if ref_type == 'assistant_message':
         return '%s: %s' % (agent, content)
     if ref_type == 'tool_result':

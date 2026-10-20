@@ -898,8 +898,10 @@ def _handle_brain_batch(brain, args, graph_changes):
     # The caller's identity, resolved once. Propagated to every sub-op under the
     # RESERVED key (never session_id) so attribution flows to the caller while
     # `session_id == filter` stays true at every layer — a sub-op can't be
-    # accidentally scoped by the ambient identity. Sub-handlers read it via
-    # caller_session(); remember additionally pops it through _pop_session_ctx.
+    # accidentally scoped by the ambient identity. Assigned over whatever an op
+    # carries ('' included), so an op's own `_caller_session` or session_id
+    # never names another caller. Sub-handlers read it via caller_session();
+    # remember additionally pops it through _pop_session_ctx.
     top_session_id = caller_session(args)
     # The batch's trace chain — injected into each sub-op so node_revised /
     # edge_relation_revised / co_anchored traces join the encoder's chain
@@ -1057,8 +1059,7 @@ def _handle_brain_batch(brain, args, graph_changes):
                                if k not in ("op", "connect_to")}
                     if top_encoding_source and "encoding_source" not in op_args:
                         op_args["encoding_source"] = top_encoding_source
-                    if top_session_id and CALLER_SESSION_KEY not in op_args:
-                        op_args[CALLER_SESSION_KEY] = top_session_id
+                    op_args[CALLER_SESSION_KEY] = top_session_id
                     if top_chain_id and "chain_id" not in op_args:
                         op_args["chain_id"] = top_chain_id
                     r = _handle_remember(brain, op_args, graph_changes)
@@ -1080,8 +1081,7 @@ def _handle_brain_batch(brain, args, graph_changes):
                     op_args = {k: v for k, v in op_spec.items() if k != "op"}
                     if top_encoding_source and "encoding_source" not in op_args:
                         op_args["encoding_source"] = top_encoding_source
-                    if top_session_id and CALLER_SESSION_KEY not in op_args:
-                        op_args[CALLER_SESSION_KEY] = top_session_id
+                    op_args[CALLER_SESSION_KEY] = top_session_id
                     if top_chain_id and "chain_id" not in op_args:
                         op_args["chain_id"] = top_chain_id
                     r = _handle_revise(brain, op_args, graph_changes)
@@ -1093,8 +1093,7 @@ def _handle_brain_batch(brain, args, graph_changes):
                     op_args = {k: v for k, v in op_spec.items() if k != "op"}
                     if top_encoding_source and "encoding_source" not in op_args:
                         op_args["encoding_source"] = top_encoding_source
-                    if top_session_id and CALLER_SESSION_KEY not in op_args:
-                        op_args[CALLER_SESSION_KEY] = top_session_id
+                    op_args[CALLER_SESSION_KEY] = top_session_id
                     if top_chain_id and "chain_id" not in op_args:
                         op_args["chain_id"] = top_chain_id
                     r = _handle_connect(brain, op_args, graph_changes)

@@ -747,7 +747,7 @@ class TestEnsureDaemonRoutesThroughLaunchd(unittest.TestCase):
     def test_no_launchd_spawn_kills_a_zombie_first(self):
         # Something accepted the re-ping and did not answer: a zombie holds
         # the port, whatever address it bound. Each kill leaves one record.
-        for transport in ("timeout", "empty", "protocol"):
+        for transport in ("timeout", "reset", "empty", "protocol"):
             with self.subTest(transport=transport):
                 dc.log_hook_error.reset_mock()
                 kill = self._spawn_path({"ok": False, "transport": transport})
@@ -4513,6 +4513,18 @@ class TestSendCommandTransportContract(unittest.TestCase):
         with patch.object(dc, "get_daemon_addr", return_value=(host, port)):
             resp = dc.send_command("probe", timeout=1.0)
         self.assertEqual(resp.get("transport"), "refused")
+
+    def test_unread_request_cut_off_by_a_closing_listener_is_reset(self):
+        # A reloading daemon keeps its socket open through teardown without
+        # accepting; the exec closes it under the queued connection. The
+        # daemon never read the request, unlike `empty`, where it read then
+        # closed.
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        threading.Timer(0.2, srv.close).start()
+        resp = dc.send_command("probe", timeout=3.0, port=srv.getsockname()[1])
+        self.assertEqual(resp.get("transport"), "reset")
 
     def test_non_object_reply_is_a_protocol_failure_not_a_raise(self):
         # Valid JSON that isn't an object (a foreign listener on the port).

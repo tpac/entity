@@ -12,6 +12,9 @@ stop_reason='refusal'. Contract locked here:
     write it stays a logged truncation
   - run_llm_once passes effort as output_config, and S2's _call_llm passes
     the unit config's effort through (None when unset)
+  - S2's _call_llm names a failed call ('LLM call failed' / 'truncated
+    response' / 'unparseable response'), logs each cause once, and logs an
+    unparseable reply whole instead of dropping it
 """
 import os
 import sys
@@ -187,6 +190,7 @@ class TestRunLlmOnce(unittest.TestCase):
 class _StubBrain:
     def __init__(self, config):
         self.config = config
+        self.errors = []
 
     def get_interaction_prompt(self, name):
         return 'SYS'
@@ -201,7 +205,7 @@ class _StubBrain:
                           'version': 0, 'id': None}}
 
     def _log_error(self, *a):
-        pass
+        self.errors.append(a)
 
 
 class TestS2EffortPassthrough(unittest.TestCase):
@@ -241,6 +245,67 @@ class TestS2EffortPassthrough(unittest.TestCase):
     def test_unset_effort_passes_none(self):
         self._call({'model': 'm', 'max_tokens': 10})
         self.assertEqual(self.kwargs[0], {'effort': None})
+
+
+class TestS2FailureIsNamedAndLogged(unittest.TestCase):
+    """A reply that parses to nothing is a paid, successful call: _call_llm
+    logs it whole and names the failure, distinct from a call that raised."""
+
+    # A doubled quote closing a string breaks the array inside a clean fence.
+    BROKEN =('```json\n[\n  {"node_id": "da6bdddb", '
+              '"question": "One adapter or one path?"",\n'
+              '   "reasoning": "r"}\n]\n```')
+
+    def setUp(self):
+        self._real_once = s2_base.run_llm_once
+        self._real_make_client = s2_base.make_client
+        s2_base.make_client = lambda: object()
+        self._env = mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'})
+        self._env.start()
+        self.brain = _StubBrain({'model': 'm', 'max_tokens': 10})
+        self.unit = IntegrationUnit.__new__(IntegrationUnit)
+        self.unit.brain, self.unit.dispatch, self.unit.NAME = self.brain, None, 'healer'
+
+    def tearDown(self):
+        self._env.stop()
+        s2_base.run_llm_once = self._real_once
+        s2_base.make_client = self._real_make_client
+
+    def test_unparseable_reply_is_logged_whole(self):
+        s2_base.run_llm_once = lambda *a, **kw: (
+            self.BROKEN, {'elapsed_ms': 1, 'stop_reason': 'end_turn',
+                          'output_tokens': 40})
+        parsed, tel = self.unit._call_llm('s2_healer', 'payload')
+        self.assertIsNone(parsed)
+        self.assertEqual(tel['failure'], 'unparseable response')
+        (source, message, context), = self.brain.errors
+        self.assertEqual(source, 's2_healer_unparseable')
+        self.assertIn('end_turn', message)
+        self.assertEqual(context, self.BROKEN)
+
+    def test_truncated_reply_is_named_truncation_and_logged_once(self):
+        s2_base.run_llm_once = lambda *a, **kw: (
+            self.BROKEN[:40], {'elapsed_ms': 1, 'stop_reason': 'max_tokens',
+                               'output_tokens': 10})
+        parsed, tel = self.unit._call_llm('s2_healer', 'payload')
+        self.assertIsNone(parsed)
+        self.assertEqual(tel['failure'], 'truncated response')
+        self.assertEqual([e[0] for e in self.brain.errors], ['s2_healer_truncation'])
+
+    def test_raised_call_is_named_call_failure(self):
+        def boom(*a, **kw):
+            raise RuntimeError('connection reset')
+        s2_base.run_llm_once = boom
+        parsed, tel = self.unit._call_llm('s2_healer', 'payload')
+        self.assertIsNone(parsed)
+        self.assertEqual(tel['failure'], 'LLM call failed')
+
+    def test_parsed_reply_carries_no_failure(self):
+        s2_base.run_llm_once = lambda *a, **kw: ('[{"node_id": "a"}]', {'elapsed_ms': 1})
+        parsed, tel = self.unit._call_llm('s2_healer', 'payload')
+        self.assertEqual(parsed, [{'node_id': 'a'}])
+        self.assertNotIn('failure', tel)
+        self.assertEqual(self.brain.errors, [])
 
 
 if __name__ == '__main__':

@@ -12,10 +12,15 @@ the planned healer redo decides that trigger.
 """
 
 HEALER = {
-    # LLM config — must match what production runs; a wrong max_tokens here is
-    # silent (a healer batch quietly truncates instead of erroring).
-    'model': 'claude-haiku-4-5',
-    'max_tokens': 4096,
+    # LLM config — must match what production runs. Thinking counts against
+    # max_tokens (~1.8k output on a 5-node batch, ~2/3 of it thinking); 16k is
+    # headroom, not a target, and a max_tokens stop is logged by _call_llm.
+    # Model and effort travel together: overrides merge key by key, so an
+    # override moving `model` to one without effort support (Haiku 4.5)
+    # must also set `effort` to null or every call is rejected.
+    'model': 'claude-haiku-5-5',
+    'effort': 'high',
+    'max_tokens': 16384,
 
     # Batch sizing
     'max_nodes_per_call': 10,        # Nodes per Haiku call
@@ -37,8 +42,9 @@ HEALER_EDGE_FORMAT = {
 }
 
 # Interaction config default for the `s2_healer` K — sliced from HEALER so
-# model/max_tokens have exactly one home in this file.
+# model/effort/max_tokens have exactly one home in this file.
 HEALER_INTERACTION_DEFAULT = {
     'model': HEALER['model'],
+    'effort': HEALER['effort'],
     'max_tokens': HEALER['max_tokens'],
 }

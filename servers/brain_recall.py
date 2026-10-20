@@ -14,7 +14,7 @@ import sys
 import time
 # Recall result cache (2026-05-08) — short-TTL dedup on top of the
 # single-flight gate. 10s window covers multi-hook bursts (pre_edit +
-# pre_bash_safety + hook_recall fire on every tool call) without
+# hook_recall land within seconds of each other) without
 # letting suggestions go stale on natural pauses. They all go through this
 # single recall layer, so one TTL knob covers every caller.
 _RECALL_CACHE_TTL_S = 10.0
@@ -942,7 +942,8 @@ class BrainRecallMixin:
                include_archived: bool = False,
                session_id: Optional[str] = None, source: str = 'unknown',
                ctx=None, as_of: Optional[str] = None,
-               mark_accessed: bool = True) -> Dict[str, Any]:
+               mark_accessed: bool = True,
+               cue_trace_id: Optional[str] = None) -> Dict[str, Any]:
         """Recall: LAF field scoring over the live graph. A node is recallable
         once its embedding lands; there is no lexical fallback path.
 
@@ -962,6 +963,9 @@ class BrainRecallMixin:
                 Passing True returns an empty result with
                 _recall_mode='archived_not_supported' (backlog #17).
             session_id: Optional session ID
+            cue_trace_id: the trace row that fired this recall (the prompt
+                hook passes its first incoming row) — the LAF moment stack's
+                window ends just before it. Every other caller passes none.
 
         Returns:
             Dict with results, _embedding_stats, _recall_mode
@@ -974,11 +978,11 @@ class BrainRecallMixin:
            one becomes leader, others wait for its result.
 
         Both keyed by (query, filter, limit, include_archived, session_id,
-        as_of, mark_accessed). session_id is in the key because synaptic
-        fatigue is per-session.
+        as_of, mark_accessed, cue_trace_id). session_id is in the key because
+        synaptic fatigue is per-session; cue_trace_id because the moment
+        stack's window ends at it.
 
-        Replaces the dispatch + brain.pre_edit caches: every recall caller
-        (pre_edit, pre_bash_safety, hook_recall, MCP) now benefits.
+        Every recall caller (hook_recall, the tool moment, MCP) shares them.
         """
         # Resolve session_id from ctx when caller passed an object; ctx wins
         # over session_id if both supplied (the convention is to pass the object).
@@ -997,6 +1001,7 @@ class BrainRecallMixin:
                 # the single-flight race and a real recall waiting behind it
                 # would silently lose its access + fatigue marking.
                 bool(mark_accessed),
+                cue_trace_id,
             )
         except Exception:
             # If key construction fails, skip dedup — better to do
@@ -1028,7 +1033,7 @@ class BrainRecallMixin:
                     include_archived=include_archived,
                     session_id=session_id, ctx=ctx,
                     source=source, as_of=as_of,
-                    mark_accessed=mark_accessed)
+                    mark_accessed=mark_accessed, cue_trace_id=cue_trace_id)
                 self._recall_cache_put(dedup_key, result)
                 inflight.set_result(result)
                 return result
@@ -1044,7 +1049,7 @@ class BrainRecallMixin:
             include_archived=include_archived,
             session_id=session_id, ctx=ctx,
             source=source, as_of=as_of,
-            mark_accessed=mark_accessed)
+            mark_accessed=mark_accessed, cue_trace_id=cue_trace_id)
 
     # ─── recall result cache (5s TTL) ─────────────────────────────────
 
@@ -1148,7 +1153,8 @@ class BrainRecallMixin:
                      session_id=None,
                      source: str = 'unknown', ctx=None,
                      as_of: Optional[str] = None,
-                     mark_accessed: bool = True) -> Dict[str, Any]:
+                     mark_accessed: bool = True,
+                     cue_trace_id: Optional[str] = None) -> Dict[str, Any]:
         """Actual recall implementation — hot path. Single-flight wrapper
         in recall() ensures only one of these runs per (query, scope) at
         a time across the daemon."""
@@ -1236,7 +1242,8 @@ class BrainRecallMixin:
             _laf_scores, _laf_fields = _laf_get_engine(self).scores(
                 self, query, query_vec, model=_active_model,
                 session_project=_session_project,
-                as_of=as_of, session_id=session_id)
+                as_of=as_of, session_id=session_id,
+                cue_trace_id=cue_trace_id)
         except Exception as _laf_e:
             self._log_error('recall_laf', _laf_e,
                             'laf scoring failed — returning empty (no fallback scorer)')

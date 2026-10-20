@@ -37,4 +37,6 @@ def main():
     emit_updated_input("PreToolUse", tool_name, updated)
 
 
-run_hook("stamp_caller_session", main)
+# gated=False: explicit brain tool calls keep working while the brain is paused
+# (that is how it gets un-paused), so they must stay attributed.
+run_hook("stamp_caller_session", main, gated=False)

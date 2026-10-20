@@ -95,6 +95,23 @@ class ContentVsSummaryPreferenceTest(unittest.TestCase):
                          'Ada: fallback')
 
 
+class IncomingSpeakerTest(unittest.TestCase):
+    # Non-operator incoming rows embed under their speaker
+    # (trace_contract.INCOMING_SPEAKERS), never the operator's identity —
+    # a session's or the brain's message is not the human speaking.
+    def test_session_message_embeds_as_session(self):
+        row = _row('self_message', content='other session says: hi',
+                   human='Ada', agent='Anchor')
+        self.assertEqual(_render_trace_for_embedding(row),
+                         'SESSION: other session says: hi')
+
+    def test_brain_delivery_embeds_as_brain(self):
+        row = _row('thalamus_delivery', content='a reminder is due',
+                   human='Ada', agent='Anchor')
+        self.assertEqual(_render_trace_for_embedding(row),
+                         'BRAIN: a reminder is due')
+
+
 class EdgeCasesTest(unittest.TestCase):
     def test_unknown_ref_type_best_effort(self):
         # Future S1 ref_types not yet templated — should still emit

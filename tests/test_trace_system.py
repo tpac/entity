@@ -7,7 +7,7 @@ Run: python3 -m pytest tests/test_trace_system.py -v
 """
 import json
 import pytest
-from servers.trace_contract import build_selection_metadata
+from servers.trace_contract import build_selection_metadata, session_short
 from tests.isolated_brain import brain_env
 
 # A K stamp for builder calls — the builders require one.
@@ -680,7 +680,7 @@ class TestGetSessionTurns:
     def _write_turn(self, session_id, stop, user_msg, assistant_msg,
                     surface_output='', recall_chain=''):
         """Helper: write one S0 turn + optional S1 recall delta."""
-        chain = 's0-%s-%s' % (session_id[:8], stop)
+        chain = 's0-%s-%s' % (session_short(session_id), stop)
         meta_k = {'content': user_msg}
         if recall_chain:
             meta_k['recall_chain'] = recall_chain
@@ -780,6 +780,30 @@ class TestGetSessionTurns:
         default_turns = self.dal.get_session_turns('sess7777aabbccdd')
         assert all('surfaced' not in t for t in default_turns)
 
+    def test_same_minute_codex_sessions_do_not_cross_attach(self):
+        """judge_output and surfaced join on the recall chain alone. Codex
+        ids are UUIDv7 — chats opened in the same minute share their first 8
+        chars — so at the same stop their chains must still differ, or each
+        turn reads the other chat's surface."""
+        from servers.session_context import SessionContext
+        sids = ('01a122b6-9059-7ca1-bb1b-a5e6ff4ce0cf',
+                '01a122b6-f3c2-7d10-8e4a-17c09b2d5e61')
+        for sid in sids:
+            recall_chain = SessionContext(sid, stop_counter=3).s1r_chain()
+            self._write_turn(sid, '3', 'question ' + sid, 'answer',
+                             surface_output='surface for ' + sid,
+                             recall_chain=recall_chain)
+            self.dal.append(chain_id=recall_chain, scale='s1', event_type='K',
+                            ref_type='surface_selected', summary='1 surfaced',
+                            metadata={'selected': [sid[-8:] + '|own pick']},
+                            session_id=sid)
+        for sid in sids:
+            turns = self.dal.get_session_turns(sid, with_surfaced=True)
+            user_turn = [t for t in turns if t['role'] == 'user'][0]
+            assert user_turn['judge_output'] == 'surface for ' + sid
+            assert user_turn['surfaced'] == [{'id': sid[-8:],
+                                              'title': 'own pick'}]
+
     def test_limit_returns_most_recent(self):
         """The SQL LIMIT must select the NEWEST turns, chronological order."""
         import time
@@ -799,7 +823,7 @@ class TestGetSessionTurns:
         lookups)."""
         import time
         sid = 'sess-interrupt-aabb'
-        chain = 's0-%s-1' % sid[:8]
+        chain = 's0-%s-1' % session_short(sid)
         self.dal.append(chain_id=chain, scale='s0', event_type='K',
                         ref_type='user_message', summary='first prompt',
                         metadata={'content': 'first prompt (interrupted)'},
@@ -850,7 +874,7 @@ class TestGetSessionTurns:
         self._write_turn(sid, '1', 'first question', 'first answer')
         time.sleep(0.01)
         # Turn 2: interrupted — user_message written, Stop never fired.
-        current_chain = 's0-%s-%s' % (sid[:8], '2')
+        current_chain = 's0-%s-%s' % (session_short(sid), '2')
         self.dal.append(chain_id=current_chain, scale='s0', event_type='K',
                         ref_type='user_message', summary='interrupted prompt',
                         metadata={'content': 'interrupted prompt'},
@@ -905,7 +929,7 @@ class TestGetSessionTurns:
         surfaced key unless asked."""
         import time
         sid = 'sess-gc-door'
-        recall_chain = 's1r-%s-1' % sid[:8]
+        recall_chain = 's1r-%s-1' % session_short(sid)
         self._write_turn(sid, '1', 'first q', 'first a',
                          recall_chain=recall_chain)
         self.dal.append(chain_id=recall_chain, scale='s1', event_type='K',

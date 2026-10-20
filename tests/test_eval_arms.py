@@ -6,6 +6,7 @@ operator's brain or config. The daemon tests boot real daemons from this
 checkout on seed brains, the path every eval arm takes.
 """
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -20,7 +22,7 @@ from tests.eval_optional import require_eval  # noqa: E402
 
 require_eval()  # D-8: the launcher lives in eval/, which the public tree omits
 
-from eval.arms import Arm, ArmError, Fleet, manifest_commands  # noqa: E402
+from eval.arms import Arm, ArmError, Fleet, manifest_commands, tree_digest  # noqa: E402
 from servers.brain import Brain  # noqa: E402
 from servers.daemon_config import get_db_lock_path  # noqa: E402
 
@@ -134,6 +136,69 @@ class TestArmSetup(_Roots):
                         'code_fingerprint': 'x', 'eval_brain_since': 1.0})
 
 
+class TestTreeDigest(unittest.TestCase):
+    """What an arm executes: servers/ and hooks/ in full, plus the runtime
+    lock it syncs. Nothing else of the tree moves the digest."""
+
+    def setUp(self):
+        self.tree = tempfile.mkdtemp(prefix='tree-digest-')
+        self._write('servers/a.py', 'x = 1\n')
+        self._write('hooks/hooks.json', '{}\n')
+        self._write('uv.lock', 'lock 1\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.tree, ignore_errors=True)
+
+    def _write(self, rel, text):
+        path = os.path.join(self.tree, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+
+    def test_code_data_hooks_and_runtime_each_move_it(self):
+        seen = {tree_digest(self.tree)}
+        for rel, text in (('hooks/hooks.json', '{"hooks": {}}\n'),
+                          ('servers/scales/aspects.json', '[]\n'),
+                          ('uv.lock', 'lock 2\n'),
+                          ('pyproject.toml', '[project]\n')):
+            self._write(rel, text)
+            seen.add(tree_digest(self.tree))
+        self.assertEqual(len(seen), 5)
+
+    def test_eval_code_docs_bytecode_and_dot_entries_do_not(self):
+        base = tree_digest(self.tree)
+        self._write('eval/driver.py', 'y = 2\n')
+        self._write('docs/notes.md', 'z\n')
+        self._write('servers/__pycache__/a.cpython-311.pyc', 'junk')
+        self._write('hooks/.DS_Store', 'finder')
+        self._write('servers/.a.py.swp', 'editor')
+        self.assertEqual(tree_digest(self.tree), base)
+
+
+class TestArmDrain(_Roots):
+    """drain() retries what drain_embeddings asks to be retried, and fails
+    the run on anything else."""
+
+    def test_a_busy_or_loading_tick_is_retried(self):
+        arm = self._arm()
+        arm.result = mock.Mock(side_effect=[
+            {'ok': False, 'busy': True, 'error': 'drain lock held'},
+            {'ok': False, 'embedder_ready': False, 'error': 'not ready'},
+            {'ok': True, 'pending_after': 0, 'embedder_ready': True}])
+        with mock.patch('eval.arms.time.sleep'):
+            self.assertTrue(arm.drain()['ok'])
+        self.assertEqual(arm.result.call_count, 3)
+
+    def test_vectors_left_behind_fail_the_run_at_once(self):
+        arm = self._arm()
+        arm.result = mock.Mock(return_value={
+            'ok': False, 'embedder_ready': True, 'pending_after': 3,
+            'error': '3 ids re-enqueued by a failed batch'})
+        with self.assertRaisesRegex(ArmError, 're-enqueued'):
+            arm.drain()
+        self.assertEqual(arm.result.call_count, 1)
+
+
 class TestArmDaemons(_Roots):
     """Real daemons from this checkout, keyless, on seed brains."""
 
@@ -150,6 +215,14 @@ class TestArmDaemons(_Roots):
             self.assertEqual([r['rc'] for r in turn['recall'] + turn['stop']],
                              [0, 0])
             self.assertEqual([r['rc'] for r in fleet['a'].end(sid)], [0])
+            # The exchange is named the way the host names a turn, so the
+            # turn rule groups it by the host's id, not the unstamped fallback.
+            from servers.trace_contract import HOST_TURN_FIELD
+            rows = fleet['a'].result('query_traces', scale='s0', session_id=sid,
+                                     ref_type='user_message')['events']
+            meta = rows[0]['metadata']
+            meta = json.loads(meta) if isinstance(meta, str) else meta
+            self.assertEqual(meta.get(HOST_TURN_FIELD), fleet['a']._turn_ids[sid])
             said = fleet['a'].command('recall_episodes', session_id=sid,
                                       limit=10)
             self.assertTrue(said.get('ok'), said)
@@ -161,7 +234,31 @@ class TestArmDaemons(_Roots):
                                        limit=10)
             self.assertNotIn('The launcher reads the tree manifest.',
                              str(other.get('result')))
+            # A command's own `name` argument reaches the daemon.
+            eff = fleet['b'].result('get_interaction_effective',
+                                    name='trace_recording')
+            self.assertEqual(eff['name'], 'trace_recording')
+            # A refused command fails the run; the raw reply stays readable.
+            with self.assertRaisesRegex(ArmError, 'no_such_command failed'):
+                fleet['b'].result('no_such_command')
+            self.assertFalse(fleet['b'].command('no_such_command').get('ok'))
+            self.assertTrue(fleet['b'].drain()['ok'])
         self.assertEqual([a.proc.returncode, b.proc.returncode], [0, 0])
+        # The arms' copies of the operator config (the API key) are gone;
+        # their folders stay.
+        for arm in (a, b):
+            self.assertFalse(os.path.exists(
+                os.path.join(arm.home, '.config', 'brain', 'env')))
+            self.assertTrue(os.path.isfile(os.path.join(arm.data, 'brain.db')))
+
+    def test_a_start_that_fails_leaves_nothing_running(self):
+        arm = self._arm('s')
+        with mock.patch('eval.arms.READY_TIMEOUT_S', 0):
+            with self.assertRaisesRegex(ArmError, 'no answer'):
+                arm.start()
+        self.assertIsNotNone(arm.proc.poll())
+        self.assertFalse(os.path.exists(
+            os.path.join(arm.home, '.config', 'brain', 'env')))
 
     def test_a_crashed_arm_fails_the_run(self):
         with Fleet([self._arm('c')]) as fleet:

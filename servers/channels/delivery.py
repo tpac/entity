@@ -1,4 +1,4 @@
-"""Delivery — the last mile: every channel that touches a live stream rides this.
+"""Delivery — the last mile: every channel that touches a live session rides this.
 
 One owner for the leg: at a delivery MOMENT, walk the SOURCES, skip the
 ineligible, render each failure-isolated, keep the blocks, trace each shown
@@ -9,10 +9,16 @@ hooks call it instead of composing sources themselves.
 
 Eligibility is a ruling as a predicate (operator rulings id:7c7e805c,
 id:bb0513ae): a source speaks at a moment iff the moment FORCES a read or
-the source SURVIVES A MISS. The courier declines the passive boot moment —
+the source SURVIVES A MISS. The courier declines the passive prompt moment —
 a consumed message that goes unread leaves only a `self_delivered` row and
 silence — while a Thalamus item stays open after a missed render and an
 unanswered ask expires loudly, so it can ride any moment.
+
+The passive moment is the session's FIRST conversational prompt, not boot
+(operator ruling id:15e46fa9, 2026-10-02): at SessionStart nothing says who
+is there, and a session a scheduler opened would consume a first-session
+reminder nobody reads. At the first prompt the recall hook knows whether an
+operator is speaking (host_contract.read_prompt) and delivers only then.
 
 MOMENT VOCABULARY lives here (thalamus_contract derives its names from
 these). Sources import their channel packages CALL-TIME inside the render
@@ -23,7 +29,7 @@ The per-source trace ref_types come from modules OUTSIDE channels/
 
 The caller owns the chain: `deliver` takes the receiving session's
 SessionContext and stamps every trace with its s0 chain — the same
-symmetric record at boot and Stop, which is what makes a delivery joinable
+symmetric record at the first prompt and at Stop, which is what makes a delivery joinable
 to the rest of the session's S0 stream.
 """
 
@@ -35,16 +41,16 @@ from servers.channels.self_channel.self_contract import REF_SELF_MESSAGE
 
 
 # ═══════════════════════════════════════════════════════════════
-# MOMENTS  —  when a live stream is touched. `forcing` is whether the
+# MOMENTS  —  when a live session is touched. `forcing` is whether the
 # channel COMPELS a read: a Stop `decision:block` reason cannot be skipped;
-# boot `additionalContext` is passive and a miss is silent.
+# prompt `additionalContext` is passive and a miss is silent.
 # ═══════════════════════════════════════════════════════════════
 Moment = namedtuple('Moment', ('name', 'forcing'))
 
-BOOT = Moment('boot', False)  # additionalContext at session start
-STOP = Moment('stop', True)   # decision:block at turn end
+PROMPT = Moment('prompt', False)  # additionalContext on the session's first operator prompt
+STOP = Moment('stop', True)       # decision:block at turn end
 
-MOMENTS = (BOOT, STOP)
+MOMENTS = (PROMPT, STOP)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -73,15 +79,16 @@ COURIER = Source('self', 'self-message(s)', REF_SELF_MESSAGE,
 THALAMUS = Source('thalamus', 'thalamus item(s)', REF_THALAMUS_DELIVERY,
                   survives_a_miss=True, render=_thalamus_render)
 
-# Join order is render order: stream speech first, the brain's items after —
+# Join order is render order: session speech first, the brain's items after —
 # the order the Stop hook always composed.
 SOURCES = (COURIER, THALAMUS)
 
 # The composed leg WARNS above this (operator ruling id:1e22a2f0 — no cap):
-# each source already caps itself at 4000, so 5000 means more than one
-# channel is contributing meaningfully. To the errors table, which has a
-# reader (query_logs).
-COMPOSITE_WARN = 5000
+# the biggest single block is one whole self-message (up to the courier's
+# SIGNAL_BODY_MAX, 5000) plus its frame, so 6000 means more than one channel
+# is contributing meaningfully. To the errors table, which has a reader
+# (query_logs).
+COMPOSITE_WARN = 6000
 
 
 def serves(source, moment):
@@ -105,8 +112,8 @@ def deliver(brain, ctx, moment):
     never a delivery the substrate already recorded as shown. The trace
     carries the rendered block as its content (capped loudly by _s0_trace,
     same as every turn trace) and the moment name as its ref_id — indexed,
-    so query_traces(ref_type=..., ref_id='boot') separates boot preludes
-    from Stop turns; the incoming side a dial-on correspondent surfaces in
+    so query_traces(ref_type=..., ref_id='prompt') separates first-prompt
+    preludes from Stop turns; the incoming side a dial-on correspondent surfaces in
     the encoder timeline (trace_contract.S0_CONVERSATIONAL_INCOMING)."""
     shown, traced = [], []  # (source, block) kept; ref_types whose trace landed
     for source in SOURCES:

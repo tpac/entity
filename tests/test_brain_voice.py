@@ -1,7 +1,7 @@
 """Tests for BrainVoice — the text the brain hands Claude.
 
 Tests cover:
-- format_recall_results, format_suggestions
+- format_recall_results
 - render_boot() and the format_boot_context() wrapper
 """
 
@@ -13,7 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tests.brain_test_base import BrainTestBase
-from servers.brain_voice import BrainVoice, ENGINEERING_TYPES, CODE_COGNITION_TYPES
+from servers.brain_voice import BrainVoice
 
 
 class TestBrainVoiceFormatters(unittest.TestCase):
@@ -35,22 +35,6 @@ class TestBrainVoiceFormatters(unittest.TestCase):
         lines = []
         BrainVoice.format_recall_results([], lines)
         self.assertEqual(lines, [])
-
-    def test_format_suggestions_basic(self):
-        suggestions = [
-            {"type": "purpose", "title": "P1", "content": "desc", "locked": True, "id": "1"},
-        ]
-        result = BrainVoice.format_suggestions("foo.py", suggestions, [], [], [])
-        self.assertIn("[BRAIN] AUTO-SUGGEST for foo.py:", result)
-        self.assertIn("ENGINEERING MEMORY", result)
-        self.assertIn("P1", result)
-        self.assertIn("[/BRAIN]", result)
-
-    def test_format_suggestions_with_impacts(self):
-        impacts = [{"title": "Breaking change", "content": "This will break X"}]
-        result = BrainVoice.format_suggestions("bar.py", [], [], [], impacts)
-        self.assertIn("CHANGE IMPACT WARNING", result)
-        self.assertIn("Breaking change", result)
 
 
 class TestBrainVoiceRenderBoot(BrainTestBase):
@@ -100,7 +84,7 @@ class TestBrainVoiceRenderBoot(BrainTestBase):
             import hook_common
             # boot_brain runs the hook and its error surfacing at import time;
             # stub both so importing it only defines the boot paths.
-            with patch.object(hook_common, 'run_hook', lambda name, fn: None), \
+            with patch.object(hook_common, 'run_hook', lambda name, fn, on_error=None, gated=True: None), \
                  patch.object(hook_common, 'get_unsurfaced_hook_errors',
                               lambda limit=10: []):
                 sys.modules.pop('boot_brain', None)
@@ -251,19 +235,6 @@ class TestBrainVoiceRenderBoot(BrainTestBase):
                         "boot must open with the identity stance")
         self.assertLess(text.find(stance), text.find("memories"),
                         "stance must sit before the state block")
-
-
-class TestBrainVoiceConstants(unittest.TestCase):
-    """The type sets format_suggestions groups by."""
-
-    def test_engineering_types(self):
-        self.assertIn("purpose", ENGINEERING_TYPES)
-        self.assertIn("mechanism", ENGINEERING_TYPES)
-        self.assertIn("lesson", ENGINEERING_TYPES)
-
-    def test_code_cognition_types(self):
-        self.assertIn("fn_reasoning", CODE_COGNITION_TYPES)
-        self.assertIn("bug_lesson", CODE_COGNITION_TYPES)
 
 
 if __name__ == '__main__':

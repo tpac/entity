@@ -14,6 +14,29 @@
 # After sourcing: BRAIN_DB_DIR, BRAIN_SERVER_DIR, PLUGIN_ROOT, BRAIN_PYTHON are set.
 # If no brain.db found, BRAIN_DB_DIR is empty — caller should exit 0.
 
+# ── A hook machine with no route to the daemon: nothing to resolve ─────────
+# Cowork runs plugin command hooks in a cloud Linux VM that cannot reach the
+# operator's Mac (brain node bc9e9e30): no runtime is worth building there
+# and no brain belongs there. The marker is host_contract's `remote_hooks`
+# (hook_common.REMOTE_HOOK_MARKERS is the Python copy;
+# tests/test_remote_hook_machine.py runs every manifest command against the
+# contract's markers). macOS is never such a machine. Here, before brain-env.sh
+# and its runtime bootstrap, so every hook ends before the ladder too. Not in
+# brain-env.sh: ./dev sources that file directly, and a developer on such a
+# machine needs a runtime and no daemon. `exit`, not `return` — a deliberate
+# break from this chain's "we're sourced, let the caller decide" rule, and only
+# off macOS: no hook can do anything here, and boot-brain.sh says so once, in
+# its own pass. The env compare is a builtin, so a local host pays no fork;
+# uname runs only when the marker matches.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+  remote_cowork)
+    if [ "$(uname -s)" != Darwin ]; then
+      echo "[resolve-brain-db] no route to the brain daemon from this machine (CLAUDE_CODE_ENTRYPOINT=$CLAUDE_CODE_ENTRYPOINT) — nothing to resolve here" >&2
+      exit 0
+    fi
+    ;;
+esac
+
 # Ensure the isolated runtime is installed and BRAIN_PYTHON / PATH point at it.
 # First hook invocation on a fresh install blocks ~15s downloading uv + Python
 # + deps. Every subsequent invocation is ~8ms (sentinel fast path).
@@ -227,10 +250,10 @@ fi
 # Full resolution chain (runs at boot or if env not set).
 #
 # Priority is: explicit-choice > existing-brain-found > create-fresh.
-# Auto-create only happens at the XDG service location (D-13) or in Cowork
-# mounts, never at a legacy path (existing users who never migrated must opt
-# in explicitly) — and never while a candidate brain sits unreachable at an
-# old default (the adoption net below).
+# Auto-create only happens at the XDG service location (D-13), never at a
+# legacy path (existing users who never migrated must opt in explicitly) — and
+# never while a candidate brain sits unreachable at an old default (the
+# adoption net below).
 DB_DIR=""
 
 # 1. Explicit override — adopted outright only when a brain actually lives
@@ -276,13 +299,6 @@ if [ -z "$DB_DIR" ]; then
       ;;
     *) _cfg_db_dir="" ;;
   esac
-fi
-
-# 2. Cowork: search mounted AgentsContext directories for an existing brain
-if [ -z "$DB_DIR" ] && [ -d "/sessions" ]; then
-  for candidate in /sessions/*/mnt/AgentsContext/brain; do
-    [ -f "$candidate/brain.db" ] 2>/dev/null && DB_DIR="$candidate" && break
-  done 2>/dev/null
 fi
 
 # 2b. The XDG service location — where new brains are born (D-13). A brain
@@ -332,18 +348,6 @@ if [ -z "$DB_DIR" ] && [ -n "$_CFG_HINT" ]; then
 fi
 if [ -z "$DB_DIR" ] && [ -n "$_ENV_HINT" ]; then
   DB_DIR="$_ENV_HINT"
-fi
-
-# 5. Cowork first-run: create in mounted AgentsContext — the mount is the
-#    durable location there; the container-local XDG home is ephemeral.
-if [ -z "$DB_DIR" ] && [ -d "/sessions" ]; then
-  for ac_dir in /sessions/*/mnt/AgentsContext; do
-    if [ -d "$ac_dir" ] 2>/dev/null; then
-      DB_DIR="$ac_dir/brain"
-      mkdir -p "$DB_DIR" 2>/dev/null || true
-      break
-    fi
-  done 2>/dev/null
 fi
 
 # 6. First-run create at the XDG service location — guarded by the adoption

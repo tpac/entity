@@ -49,6 +49,16 @@ def _read_env_file_key(path: str, key: str):
     return None
 
 
+def user_env_file() -> str:
+    """The user config file (~/.config/brain/env) — the dashboard's one
+    spelling of the path brain-env.sh / brain_constants.user_env_file resolve;
+    read here for BRAIN_DB_DIR and the key's presence, written only by the
+    daemon."""
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(xdg, "brain", "env")
+
+
 def _brain_dir() -> str:
     """Resolve the brain data dir — the dashboard's sanctioned mirror of
     daemon_config.resolve_db_dir (the disconnection contract forbids importing
@@ -63,13 +73,12 @@ def _brain_dir() -> str:
     d = os.environ.get("BRAIN_DB_DIR")
     if d:
         return d
-    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config")
-    cfg = _read_env_file_key(os.path.join(xdg, "brain", "env"), "BRAIN_DB_DIR")
+    env_file = user_env_file()
+    cfg = _read_env_file_key(env_file, "BRAIN_DB_DIR")
     if cfg and os.path.isfile(os.path.join(cfg, "brain.db")):
         return cfg
     rec = _read_env_file_key(
-        os.path.join(xdg, "brain", "resolved.env"), "BRAIN_DB_DIR")
+        os.path.join(os.path.dirname(env_file), "resolved.env"), "BRAIN_DB_DIR")
     if rec and os.path.isfile(os.path.join(rec, "brain.db")):
         return rec
     native = os.path.join(

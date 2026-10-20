@@ -1,12 +1,12 @@
 ---
 name: dashboard
-description: Open the brain dashboard — the read-only observer UI (graph, traces, live decode/encode, streams, logs) served locally at http://localhost:47303. Invoke `/dashboard` (`/entity:dashboard`) to make sure it's running and open it in the browser. Use whenever the operator says "open / show / launch the dashboard", "let me see the brain dashboard", "bring up the dashboard", or similar. The dashboard is an always-on singleton on a fixed port — you don't launch one per chat, you ensure the one is up and open it.
+description: Open the brain dashboard — the observer UI (graph, traces, live decode/encode, sessions, logs) served locally at http://localhost:47303. Invoke `/dashboard` (`/entity:dashboard`) to make sure it's running and open it in the browser. Use whenever the operator says "open / show / launch the dashboard", "let me see the brain dashboard", "bring up the dashboard", or similar. The dashboard is an always-on singleton on a fixed port — you don't launch one per chat, you ensure the one is up and open it.
 ---
 
 # Open the brain dashboard
 
-The dashboard is the brain's **read-only observer UI** — graph, traces, live
-decode/encode, streams, logs — served on a fixed local port (47303 by default,
+The dashboard is the brain's **observer UI** — graph, traces, live
+decode/encode, sessions, logs — served on a fixed local port (47303 by default,
 `$DASHBOARD_PORT` to override). It is a **singleton**: one process, shared by every
 session (like the daemon). You never launch one per chat — you ensure the single
 one is up, then open it. The first `/dashboard` **installs** the singleton; from then on launchd keeps it

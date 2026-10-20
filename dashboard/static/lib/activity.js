@@ -11,7 +11,7 @@
 // So: one chronological feed, two independent card kinds, each rendering only
 // what it actually is. A surface run shows what surfaced and what won; an
 // encode run shows the residue and the writes. Neither pretends the other
-// exists. Same time axis, same stream hues — related, not conflated.
+// exists. Same time axis, same session hues — related, not conflated.
 //
 // Shared chrome (session chip, journal chip, prompt section, action rows) comes
 // from lib/sessions.js, lib/journal.js and lib/cards.js, so the two card kinds
@@ -89,7 +89,7 @@ export function fingerprint(item) {
 }
 
 // ── Shared header scaffold ─────────────────────────────────────────────────
-// Both kinds open with the same left-hand run: time, stream, turn. Only the
+// Both kinds open with the same left-hand run: time, session, turn. Only the
 // badge and the counts differ, which is exactly the amount they have in common.
 function _headBase(item, { showSession }) {
   return [

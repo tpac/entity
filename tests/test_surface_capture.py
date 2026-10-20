@@ -45,10 +45,12 @@ CANDS = [
      'created_at': '2026-06-15T10:00:00+00:00'},
 ]
 
+from tests.brain_test_base import turns_of  # noqa: E402
+
 INPUT_KW = dict(
     user_message='what did we decide about alpha?',
-    recent_messages=[{'role': 'user', 'content': 'earlier turn'},
-                     {'role': 'assistant', 'content': 'earlier reply'}],
+    recent_turns=turns_of([{'role': 'user', 'content': 'earlier turn'},
+                           {'role': 'assistant', 'content': 'earlier reply'}]),
     retrieval_stats={'n_results': 2},
     frame='## Current focus\nGreek letters',
 )
@@ -60,8 +62,8 @@ def _begin(brain, user_content='RENDERED', layout='xml_v13', **over):
         surface_instructions='SYSTEM TEXT',
         interaction_stamp={'fingerprint': 'abcdef123456',
                            'source': 'override', 'version': 14, 'id': 124},
-        user_content=user_content, max_tokens=600,
-        variant='v5_agentic', model='claude-haiku-4-5',
+        user_content=user_content, max_tokens=4096,
+        variant='v5_agentic', model='claude-haiku-5-5', effort='medium',
         session_id='sess-cap', **INPUT_KW)
     kw.update(over)
     return surface_capture.begin(brain, **kw)
@@ -124,6 +126,7 @@ class TestCaptureLifecycle:
         assert data['recall_ref'] == 'r-123'
         assert data['stamps']['interaction_version'] == 14
         assert data['stamps']['layout'] == 'xml_v13'
+        assert data['stamps']['effort'] == 'medium'
         assert data['stamps']['schema_sha']
         assert data['inputs']['candidates_pre_tools'][0]['id'] == 'a' * 32
         assert data['rendered']['user_content'] == 'RENDERED'
@@ -201,7 +204,7 @@ class TestByteTruthFidelity:
         layout = SURFACE_LAYOUT
         user_content, max_tokens = build_surface_prompt(
             CANDS, INPUT_KW['user_message'],
-            recent_messages=INPUT_KW['recent_messages'],
+            recent_turns=INPUT_KW['recent_turns'],
             retrieval_stats=INPUT_KW['retrieval_stats'],
             frame=INPUT_KW['frame'],
             shuffle_seed=seed, scope=scope)
@@ -213,7 +216,7 @@ class TestByteTruthFidelity:
         i = cap['inputs']
         rerendered, _ = build_surface_prompt(
             i['candidates_pre_tools'], i['user_message'],
-            recent_messages=i['recent_messages'],
+            recent_turns=i['recent_turns'],
             retrieval_stats=i['retrieval_stats'],
             frame=i['frame'],
             shuffle_seed=i['shuffle_seed'],

@@ -1766,8 +1766,8 @@ LOG_TABLES = {
         )""",
     },
 
-    # Self channel — directed-signal courier (Phase 2a). One stream sends a
-    # message addressed to another live stream (self:<sid>) or self:broadcast;
+    # Self channel — directed-signal courier (Phase 2a). One session sends a
+    # message addressed to another live session (self:<sid>) or self:broadcast;
     # the recipient consumes it once via self_delivered. Pull-based in 2a.
     # Per-message expires_at (resolved by address at send) enforces TTL — readers
     # filter expires_at > now; reap deletes expires_at <= now OR IS NULL. Nullable
@@ -1795,7 +1795,7 @@ LOG_TABLES = {
         )""",
     },
 
-    # Thalamus — the brain speaking to its streams (servers/channels/thalamus/).
+    # Thalamus — the brain speaking to its sessions (servers/channels/thalamus/).
     # One item is a STANDING INTENT that can deliver to N sessions over its
     # window; the courier above stays one-shot. `deliver_at` NULL = next
     # opportunity; `dedup_key` is producer-owned or '' (never derived from
@@ -1842,7 +1842,7 @@ LOG_TABLES = {
     # served to a session at SessionStart. context_boot is read-only re: the
     # knowledge graph, but it logs what it served here (the same pattern as
     # recall writing a trace from a read path). One row per real boot; the
-    # dashboard's Streams→Boot view reads the latest per session. "What
+    # dashboard's Sessions→Boot view reads the latest per session. "What
     # actually got to boot." Written by Brain.record_boot_render via
     # _handle_context_boot; never gated on a BRAIN_VERSION bump (new table).
     'boot_renders': {

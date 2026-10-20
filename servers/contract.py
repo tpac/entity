@@ -351,6 +351,12 @@ REFUSAL_POINTER_KEYS = ('survivor_id', 'current')
 SWAP_CURRENT_HINT = ("its whole stored value is returned beside this "
                      "refusal as `current`")
 
+# Set true on a reply that declined a command before running it, for a cause
+# that passes (daemon_server._locked_exec: the write lock was busy). Nothing
+# ran, so a caller may resend it; the MCP proxy's retry reads it. Absent on
+# every reply where the command ran, even partly.
+NOT_RUN_FIELD = 'not_run'
+
 
 def refusal_pointers(refusal):
     """The REFUSAL_POINTER_KEYS a refusal dict carries, for a door to pass on."""
@@ -1961,12 +1967,14 @@ def render_rich_node(node, config=None):
     if content_limit != 0:
         content = node.get('content', '')
         if content_limit and content_limit > 0:
-            # 'sentence': cut on a sentence boundary and name the remainder
-            # (the inject) — a reader acting on the text must know it ends
-            # early. Default: the bare ellipsis cut.
+            # 'sentence': cut on a sentence boundary — a reader acting on the
+            # text must know it ends early. The marker names the remainder
+            # unless the caller sets `content_cut_marker` (the tool moment's
+            # bare '…'). Default: the bare ellipsis cut.
             if cfg.get('content_cut') == 'sentence':
-                content = cap_text_at_boundary(content, content_limit,
-                                               marker=CONTENT_CUT_MARKER)
+                content = cap_text_at_boundary(
+                    content, content_limit,
+                    marker=cfg.get('content_cut_marker') or CONTENT_CUT_MARKER)
             else:
                 content = truncate_marked(content, content_limit)
         if content:

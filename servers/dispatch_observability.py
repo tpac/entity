@@ -5,8 +5,9 @@ Traces, logs, outcomes (the nervous system) and interactions (the K store).
 
 import json
 
+from .channels.self_channel import signal
 from .clock import iso_cutoff
-from .contract import truncation_payload_ids
+from .contract import add_reply_note, truncation_payload_ids
 from .dispatch_common import _agent_limit
 from .trace_contract import TRACE_BATCH_MAX_IDS
 
@@ -36,7 +37,12 @@ def _handle_trace_append(brain, args, graph_changes):
     # prompt or without a session id. Hooks send facts; the daemon owns kinds.
     scale = args.get("scale", "s0")
     session_id = args.get("session_id", "")
+    chain_id = args.get("chain_id", "")
     if scale == 's0':
+        # The daemon names the S0 chain from the session's own stop counter,
+        # the chain its prompt and reply rows use. A hook can't know it on a
+        # machine without the daemon, and an older hook's guess is ignored.
+        chain_id = brain.s0_chain_for(session_id)
         from .brain_traces import stamp_s0_session, stamp_tool_result
         env = brain.session_env_for(session_id) if session_id else {}
         if args.get('ref_type') == 'tool_result':
@@ -76,7 +82,7 @@ def _handle_trace_append(brain, args, graph_changes):
             raw_meta = stamp_s0_session(raw_meta, env)
     try:
         event_id = brain._trace_dal.append(
-            chain_id=args.get("chain_id", ""),
+            chain_id=chain_id,
             scale=scale,
             event_type=args.get("event_type", ""),
             ref_type=args.get("ref_type", ""),
@@ -137,50 +143,100 @@ def _handle_get_traces(brain, args, graph_changes):
     return {"ok": True, "result": result}
 
 
+def _resolve_session_filter(brain, args, tool):
+    """Resolve the session filter's references to the ids trace rows store.
+
+    A model names a session by its full id or by the short every trace header
+    shows; the rows hold the full id, so a short passed through verbatim
+    matches nothing. Each reference goes through signal.resolve_session's
+    history pool (every session with traces). An unresolved or ambiguous
+    reference is an error to the caller, never an empty result that reads as
+    "nothing happened in that session". So is a session_ids that names no
+    session — an empty list, or an empty entry: downstream an empty scope is
+    no scope, and the pull would answer for every session. Returns
+    (session_id, session_ids, error); absent forms come back as sent.
+    Internal callers pass full ids to brain.query_traces / recall_episodes
+    directly and never come through here.
+    """
+    sid = args.get("session_id")
+    sids = args.get("session_ids")
+    if sid is not None and not isinstance(sid, str):
+        return None, None, "session_id must be a string"
+    if sids is not None and not (isinstance(sids, list)
+                                 and all(isinstance(s, str) for s in sids)):
+        return None, None, "session_ids must be a list of strings"
+    if sids is not None and not (sids and all(sids)):
+        return None, None, ("%s: session_ids must name at least one session, with "
+                            "no empty entries — omit it to read every session" % tool)
+    resolved = {}
+    for ref in [sid] + list(sids or []):
+        if ref and ref not in resolved:
+            full, error = signal.resolve_session(brain, ref, pool='history')
+            if error:
+                return None, None, "%s: session filter: %s" % (tool, error)
+            resolved[ref] = full
+    return (resolved.get(sid, sid),
+            [resolved.get(s, s) for s in sids] if sids is not None else None,
+            None)
+
+
 def _handle_query_traces(brain, args, graph_changes):
     """Query trace events: O/K/Δ/outcome at every scale.
 
-    session_id / session_ids handling: brain.query_traces (and ultimately
-    TraceDAL.get_recent) refuses to combine the two. We forward what the
-    caller sent verbatim and surface any ValueError as a structured error
-    rather than crashing the daemon thread.
+    session_id / session_ids name sessions by full id or short, resolved by
+    _resolve_session_filter — except under chain_id, which overrides every
+    other filter, so a session filter beside it is never resolved or applied.
+    brain.query_traces (and ultimately TraceDAL.get_recent) refuses to combine
+    the two; any ValueError surfaces as a structured error rather than
+    crashing the daemon thread. A scoped pull that stayed hours-bound
+    (`window_hours` in the result) says so in an information note — the
+    rendered rows alone read as the whole session.
     """
-    sids = args.get("session_ids")
-    if sids is not None and not isinstance(sids, list):
-        return {"ok": False, "error": "session_ids must be a list of strings"}
+    chain_id = args.get("chain_id", "")
+    sid, sids, error = (("", None, None) if chain_id else
+                        _resolve_session_filter(brain, args, "query_traces"))
+    if error:
+        return {"ok": False, "error": error}
     try:
         result = brain.query_traces(
             scale=args.get("scale", ""),
             hours=args.get("hours", 24),
             event_type=args.get("event_type", ""),
-            chain_id=args.get("chain_id", ""),
-            session_id=args.get("session_id", ""),
+            chain_id=chain_id,
+            session_id=sid or "",
             session_ids=sids,
             ref_type=args.get("ref_type", ""),
             grouped=args.get("grouped", False),
             limit=args.get("limit", 100))
-        return {"ok": True, "result": result}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    reply = {"ok": True, "result": result}
+    window = result.get("window_hours") if isinstance(result, dict) else None
+    if window is not None:
+        add_reply_note(reply, "information",
+                       "Hours-bound: this scoped pull covers only the last %sh "
+                       "— widen hours to reach older rows." % window)
+    return reply
 
 
 def _handle_recall_episodes(brain, args, graph_changes):
     """Episodic pull over the traces layer — semantic (`query`) and/or lexical
     (`contains`) search over trace_events, returning full episode records.
 
-    session_id / session_ids are mutually exclusive (filter_events raises);
-    surface any ValueError as a structured error rather than crashing the
-    daemon thread, same as query_traces.
+    session_id / session_ids name sessions by full id or short, resolved by
+    _resolve_session_filter; they are mutually exclusive (filter_events
+    raises). Any ValueError surfaces as a structured error rather than
+    crashing the daemon thread, same as query_traces.
     """
     from .brain_constants import EPISODE_DEFAULT_LIMIT, EPISODE_MAX_LIMIT
-    sids = args.get("session_ids")
-    if sids is not None and not isinstance(sids, list):
-        return {"ok": False, "error": "session_ids must be a list of strings"}
+    sid, sids, error = _resolve_session_filter(brain, args, "recall_episodes")
+    if error:
+        return {"ok": False, "error": error}
     try:
         result = brain.recall_episodes(
             query=args.get("query"),
             contains=args.get("contains"),
-            session_id=args.get("session_id"),
+            session_id=sid,
             session_ids=sids,
             scale=args.get("scale", "s0"),
             event_type=args.get("event_type"),

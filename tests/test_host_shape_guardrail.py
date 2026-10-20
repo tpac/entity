@@ -37,7 +37,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from servers.host_contract import HOST_CONTRACT  # noqa: E402
-from servers.trace_contract import WAKE_ENVELOPE_MARKER  # noqa: E402
 
 # hooks/adapters/ is NOT scanned: those modules are a host's own setup and
 # onboarding BEHAVIOUR, keyed by host by design (brain node 368b15af) — the
@@ -51,15 +50,10 @@ EXCLUDE_FILES = {'servers/host_contract.py'}
 TOOL_NAMES = sorted({n for e in HOST_CONTRACT.values() for n in e['tools']}
                     | {a for e in HOST_CONTRACT.values() for a in e['matcher_aliases']})
 HOST_KEYS = sorted(HOST_CONTRACT)
-# Envelope tags the hosts inject into prompts. Hardcoded here until the
-# contract's `envelopes` tables are populated (design step 3), when this
-# derives from them the way TOOL_NAMES derives from `tools`.
-ENVELOPE_TAGS = (
-    WAKE_ENVELOPE_MARKER, '<system-reminder>', '<send_user_message_question_reply>',
-    '# Files mentioned by the user:', '# Files pasted by the user:', '## My request',
-    '# Response annotations:', '# Diff comments:', '# Browser comments:',
-    '# Selected text:', '# Failing PR checks:',
-)
+# Envelope tags the hosts inject into prompts, derived from the contract's
+# `envelopes` tables the way TOOL_NAMES derives from `tools` — a wrapper is
+# declared once, and the ratchet sees it from then on.
+ENVELOPE_TAGS = tuple(sorted({t for e in HOST_CONTRACT.values() for t in e['envelopes']}))
 
 TOOL_RE = re.compile(r"""(['"])(%s)\1""" % '|'.join(map(re.escape, TOOL_NAMES)))
 KEY_RE = re.compile(r"""(['"])(%s)\1""" % '|'.join(map(re.escape, HOST_KEYS)))
@@ -72,7 +66,6 @@ ALLOWED = {
     'servers/scales/s1/encoder_actions.py': 4,  # frozen legacy summary-name map (D10); normalized predicates have no host names
     'servers/trace_contract.py': 1,             # step 3: WAKE_ENVELOPE_MARKER moves into the contract's envelopes
     'hooks/scripts/post_tool_trace.py': 11,     # summary's 10 + step 1's raw patch capture (1); both need tool_input's per-tool fields until canonical arguments (deferred), mirrored by TestHookMirrors
-    'hooks/scripts/pre_response_recall.py': 1,  # step 3: wake routing reads the contract's envelope table
     'dashboard/queries/_meta.py': 1,            # step 3: the dashboard's one mirror of WAKE_ENVELOPE_MARKER (it may not import servers/), read by stats.py; test_dashboard_disconnection pins it
 }
 

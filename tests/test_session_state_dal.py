@@ -1,7 +1,7 @@
 """Unit tests for SessionStateDAL's session-context lifecycle methods.
 
 These three methods were added when the raw session_state SQL in brain.py
-(get_or_create_session / present_streams / live_sessions) was migrated onto
+(get_or_create_session / present_sessions / live_sessions) was migrated onto
 the DAL (DAL cleanup Phase 4). The load-bearing semantic is ensure_default's
 INSERT-OR-IGNORE: it must NOT clobber a racing thread's already-mutated row,
 which is exactly what distinguishes it from set()'s upsert.

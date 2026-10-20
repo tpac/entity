@@ -10,7 +10,7 @@ hands off to one storage branch: a live-now FYI delegates to the courier
 broadcast and goes terminal immediately (`_file_live`); everything with a
 clock, a window, or an answer queues (`_file_queued`). Delivery is PULL-ONLY
 at the two moments that provably land — the Stop
-drain and the boot render — so the Thalamus never enumerates sessions, never
+drain and the first-prompt render — so the Thalamus never enumerates sessions, never
 pushes, holds no roster: each session self-serves against the item list and
 records its own delivery in the ledger at render time (annotate-at-render —
 the only visibility mechanism that survives courier receipt expiry, brain
@@ -138,7 +138,7 @@ def file(brain, source, body, *, needs_answer=False, when=None, for_whom=None,
     caller's own tool trail.
 
     Routing: for_whom 'live' delegates to the courier broadcast (requires a
-    filing session — the locked stream-speech render must stay honest) and the
+    filing session — the locked session-speech render must stay honest) and the
     row goes terminal 'sent'. Everything else queues for pull delivery.
 
     Identity: a repeat (source, dedup_key, target_session) UPDATES the open
@@ -206,7 +206,7 @@ def file(brain, source, body, *, needs_answer=False, when=None, for_whom=None,
         if not session_id:
             return _reject(
                 "thalamus.file: for_whom='live' requires a filing session "
-                "(the stream-speech render needs an honest sender); "
+                "(the session-speech render needs an honest sender); "
                 "machine live-now is Phase 3")
         result = _file_live(brain, source, body, refs, refs_json, session_id,
                             now)
@@ -234,9 +234,12 @@ def _file_live(brain, source, body, refs, refs_json, session_id, now):
     (thalamus_list) and has no ledger lifecycle: the courier owns delivery and
     death (1h TTL). Phase 3's machine live-now rewrites exactly this."""
     from servers.channels.self_channel import signal, self_contract
-    sent = signal.send(brain, from_session=session_id,
-                       address=self_contract.ADDR_BROADCAST,
-                       body=body, refs=refs)
+    try:
+        sent = signal.send(brain, from_session=session_id,
+                           address=self_contract.ADDR_BROADCAST,
+                           body=body, refs=refs)
+    except ValueError as e:  # the courier's door refused the body
+        return _reject(str(e))
     with brain.logs_write_lock:
         item_id = _insert_item(
             brain.logs_conn_w, source=source, body=body, refs=refs_json,
@@ -488,11 +491,11 @@ def _attach_ref_lines(brain, items, session_id):
 
 
 def pull(brain, session_id, via):
-    """Due items for this session at a delivery moment ('boot' | 'stop') —
+    """Due items for this session at a delivery moment ('prompt' | 'stop') —
     rendered block + count of items actually shown. Writes the ledger at
     render for exactly those items (INSERT OR IGNORE: the PK makes re-render
     idempotent per session and epoch). Asks (needs_answer) deliver at their
-    audience's tc.ASK_MOMENTS — broadcast at boot only, directed at Stop.
+    audience's tc.ASK_MOMENTS — broadcast at the first prompt only, directed at Stop.
 
     The caller owns tracing (channels/delivery.py holds the chain at both
     moments); the ledger here is the delivery-policy record. Two sessions
@@ -541,7 +544,9 @@ def pull(brain, session_id, via):
     # Render FIRST, then ledger only what the block actually shows — a
     # cap-dropped item was never delivered, and a ledger row would suppress
     # it forever; unledgered, it stays armed for the next moment.
-    block, kept = tc.render_block(items, overflow=overflow)
+    block, kept = tc.render_block(
+        items, overflow=overflow,
+        counterpart=brain.counterpart_for(session_id))
     delivered_at = iso_now()
     with brain.logs_write_lock:
         brain.logs_conn_w.executemany(

@@ -228,8 +228,8 @@ class TestScriptsRouteThroughEmitter(unittest.TestCase):
 
     def test_scan_sees_both_shims_and_bodies(self):
         # Guard against a glob typo making the scan vacuous.
-        self.assertIn("pre-bash-safety.sh", self.sources)
-        self.assertIn("pre_bash_safety.py", self.sources)
+        self.assertIn("pre-edit-suggest.sh", self.sources)
+        self.assertIn("pre_edit_suggest.py", self.sources)
 
     def test_no_script_prints_approve(self):
         for name, src in self.sources.items():

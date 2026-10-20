@@ -263,7 +263,8 @@ class TestAspectDecoderFillLane(BrainTestBase):
         def fake_call(self_, interaction_name, user_content, journal=False):
             calls.append(user_content)
             if fail_on and len(calls) == fail_on:
-                return None, {'elapsed_ms': 1, 'model': 'stub', 'interaction': _STUB_STAMP}
+                return None, {'elapsed_ms': 1, 'model': 'stub', 'interaction': _STUB_STAMP,
+                              'failure': 'LLM call failed'}
             import re
             body = user_content[1]
             values = re.findall(r'^  value: "(.*)"$', body, re.M)

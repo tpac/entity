@@ -163,8 +163,8 @@ class TestAddressedRouting(BrainTestBase):
         self._scribe().harvest(ADDRESSED_TEXT, CHAIN)
         block, n = thalamus.pull(self.brain, S1, via='stop')
         self.assertEqual(n, 2)
-        self.assertIn('encoder:sonnet asks', block)
-        self.assertIn('encoder:sonnet notes', block)
+        self.assertIn('I need to help my scribe:', block)
+        self.assertIn('My scribe noticed:', block)
 
     def test_no_source_keeps_them_as_notes_and_warns(self):
         # No source (a bare eval binding) → plain residue, one loud warning.
@@ -177,23 +177,35 @@ class TestAddressedRouting(BrainTestBase):
         b = JournalBinding(self.brain, scale='s1', session_id=S1)
         self.assertEqual(self._warnings(b._log_key('addressed_unbound')), 1)
 
-    def test_s2_unit_files_broadcast_delivered_at_boot(self):
-        """An S2 binding has a source and no session: its ask is broadcast,
-        due at every session's boot (not Stop); its tell reaches the first
-        session to boot. Same instruction, same door, other audience."""
+    def test_s2_unit_files_broadcast_delivered_at_first_prompt(self):
+        """An S2 binding has a source and no session: both lines broadcast.
+        The ask reaches every session once, at its first prompt only (never
+        Stop); the tell reaches one session in all — whichever pulls first,
+        at either moment. Same instruction, same door, other audience."""
         from servers.channels.thalamus import thalamus
+        from servers.channels.thalamus import thalamus_contract as tc
         JournalBinding(self.brain, scale='s2', unit='consolidation',
                        source='s2:consolidation').harvest(
             ADDRESSED_TEXT, 's2-20260905120000-consolidation')
-        items = self._items(source='s2:consolidation', target_session='')
+        items = {i['needs_answer']: i for i in self._items(
+            source='s2:consolidation', target_session='')}
         self.assertEqual(len(items), 2)
-        self.assertTrue(all(i['target_session'] == '' for i in items))
-        _, n_stop = thalamus.pull(self.brain, S1, via='stop')
-        self.assertEqual(n_stop, 1)          # the tell (a notice) only
-        _, n_boot = thalamus.pull(self.brain, S1, via='boot')
-        self.assertEqual(n_boot, 1)          # the ask
-        _, n_other = thalamus.pull(self.brain, S2, via='boot')
-        self.assertEqual(n_other, 1)         # every session sees the ask once
+        self.assertTrue(all(i['target_session'] == ''
+                            for i in items.values()))
+        self.assertEqual((items[True]['audience'], items[False]['audience']),
+                         (tc.AUDIENCE_EVERY, tc.AUDIENCE_FIRST))
+        block, n = thalamus.pull(self.brain, S1, via='stop')
+        self.assertEqual(n, 1)               # the tell only: the ask waits
+        self.assertIn('you are proceeding', block)
+        block, n = thalamus.pull(self.brain, S1, via='prompt')
+        self.assertEqual(n, 1)               # the ask
+        self.assertIn('milestone says', block)
+        for via in tc.MOMENTS:               # nothing comes to S1 twice
+            self.assertEqual(thalamus.pull(self.brain, S1, via=via)[1], 0)
+        self.assertEqual(thalamus.pull(self.brain, S2, via='stop')[1], 0)
+        block, n = thalamus.pull(self.brain, S2, via='prompt')
+        self.assertEqual(n, 1)               # every session sees the ask once;
+        self.assertIn('milestone says', block)  # the tell was S1's alone
         filed = [e for e in self.brain.query_traces(
             chain_id='s2-20260905120000-consolidation')['chain']
                  if e['ref_type'] == 'thalamus_filed']
@@ -362,7 +374,7 @@ class TestProducerView(BrainTestBase):
             self.assertIn(line, view)
         self.assertNotIn('never mind', view)
         # Nothing about delivery: no counts, no moments, no dates.
-        for word in ('delivered', 'boot', 'stop', '×', '2026-'):
+        for word in ('delivered', 'prompt', 'stop', '×', '2026-'):
             self.assertNotIn(word, view)
 
     def test_settled_window_and_open_pin(self):
@@ -664,7 +676,8 @@ class TestSingleShotCallLlm(BrainTestBase):
             seen['name'] = name
             seen['journal'] = journal
             seen['user'] = user_content
-            return None, {'elapsed_ms': 0, 'interaction': {'fingerprint': 'stub'}}
+            return None, {'elapsed_ms': 0, 'interaction': {'fingerprint': 'stub'},
+                          'failure': 'LLM call failed'}
 
         unit._call_llm = fake_call
         unit.journal.harvest(

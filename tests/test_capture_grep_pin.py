@@ -8,7 +8,7 @@ record_payload / read_payload (in-process) or the sanctioned direct
 payload readers (dashboard/db.py, eval fresh_brain.capture_files_for).
 
 Operational STATE files are not capture and are deliberately out of pin
-scope: `brain-{session}-current-stop.txt` survives.
+scope.
 
 ALLOWLIST: eval/longmem/connect_ab.py READS a frozen pre-migration
 capture corpus (pooled brain-encoding-prompt-*.json) as replay input —

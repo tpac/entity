@@ -9,7 +9,7 @@ serving only scales.
 Does NOT belong here: a package whose DOMAIN clock is real-elapsed — delivery
 windows, TTLs, roster staleness. (Perf timers and `created_at` stamps are
 bookkeeping, not domain time; they are fine here and both contracts already
-exempt them.) Such a package is a correspondent addressing a live stream, not
+exempt them.) Such a package is a correspondent addressing a live session, not
 a grain: it goes in `servers/channels/`, the way `self_channel` and `thalamus`
 do.
 

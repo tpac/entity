@@ -6,7 +6,7 @@ maintenance (and the connection keepalive) may run. Held on the brain
 parameters threaded through call sites.
 
 GLOBAL, not per-session. S2 operates on the whole graph and one daemon serves
-many concurrent streams, so these counters aggregate across all of them — they
+many concurrent sessions, so these counters aggregate across all of them — they
 are deliberately NOT keyed by session_id.
 
 Mutated by the daemon / hooks as events arrive (record_*); read — and consumed —

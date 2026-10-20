@@ -14,6 +14,7 @@ import re
 
 from tests.brain_test_base import BrainTestBase
 from servers.scales.s1.encode import _build_user_content
+from servers.trace_contract import session_short
 
 # A parseable `## Review` section: a fenced ``` block of `tag · subject · note`
 # lines (the format extract_review_block requires — the review-block instructions
@@ -30,13 +31,16 @@ def _review(note_line):
     return "## Review\n```\n%s\n```\n" % note_line
 
 
-def _msgs():
-    # Minimal two-turn window; judge_output empty so the catalog stays small.
-    return [
-        {'role': 'user', 'content': 'do a thing', 'id': 'turn-0',
-         'trace_id': 'u1', 'judge_output': ''},
-        {'role': 'assistant', 'content': 'done', 'trace_id': 'a1'},
-    ]
+def _turns():
+    # A minimal one-turn window as encode._window hands it over; judge_output
+    # empty so the catalog stays small.
+    def row(tid, ref_type, text):
+        return {'id': tid, 'ref_type': ref_type, 'chain_id': 's0-residue-0',
+                'created_at': '2026-10-19T00:00:00+00:00', 'summary': text,
+                'metadata': {'content': text}, 'content': text}
+    user = dict(row('u1', 'user_message', 'do a thing'), judge_output='')
+    return [{'user': user, 'with': [], 'assistant': row('a1', 'assistant_message', 'done'),
+             'actions': []}]
 
 
 class TestResidueWiring(BrainTestBase):
@@ -61,10 +65,10 @@ class TestResidueWiring(BrainTestBase):
         # 'RECENT REVIEW NOTES').
         sid = 'sess-lived'
         self.brain.write_journal_notes(
-            final_text=_REVIEW, chain_id='s1e-%s-3' % sid[:8],
+            final_text=_REVIEW, chain_id='s1e-%s-3' % session_short(sid),
             scale='s1', session_id=sid)
         _pre, body, _cat, _ids = _build_user_content(
-            self.brain, _msgs(), counter=8, session_id=sid)
+            self.brain, _turns(), counter=8, session_id=sid)
         assert 'RECENT REVIEW NOTES' in body
         assert 'dedup-risk' in body
 
@@ -72,7 +76,7 @@ class TestResidueWiring(BrainTestBase):
         # No prior notes this session → the continuity block is simply absent
         # (no 'first run' filler), and the encode still assembles.
         _pre, body, _cat, _ids = _build_user_content(
-            self.brain, _msgs(), counter=1, session_id='sess-fresh')
+            self.brain, _turns(), counter=1, session_id='sess-fresh')
         assert 'RECENT REVIEW NOTES' not in body
 
     def test_lived_body_uses_xml_section_wrappers(self):
@@ -82,10 +86,10 @@ class TestResidueWiring(BrainTestBase):
         sid = 'sess-xml'
         self.brain.set_config('session_context_%s' % sid, 'building S1E reconciliation')
         self.brain.write_journal_notes(
-            final_text=_REVIEW, chain_id='s1e-%s-3' % sid[:8],
+            final_text=_REVIEW, chain_id='s1e-%s-3' % session_short(sid),
             scale='s1', session_id=sid)
         pre, body, _cat, _ids = _build_user_content(
-            self.brain, _msgs(), counter=8, session_id=sid)
+            self.brain, _turns(), counter=8, session_id=sid)
         assert '<continuity>' in body and '</continuity>' in body
         # prefix — the view policy stamps <timeline now="…">; this test's concern
         # is the XML wrappers, not the tag's attributes (exact shape + contents
@@ -105,7 +109,7 @@ class TestResidueWiring(BrainTestBase):
         # silently loses its temporal anchor and every relative `age=` below it
         # stops being invertible. Pattern, not a literal: the value is real time.
         _pre, body, _cat, _ids = _build_user_content(
-            self.brain, _msgs(), counter=8, session_id='sess-stamp')
+            self.brain, _turns(), counter=8, session_id='sess-stamp')
         assert re.search(r'<timeline now="\d{4}-\d\d-\d\d \d\d:\d\d UTC">', body)
 
     def test_s1e_continuity_k_default_is_five(self):
@@ -114,7 +118,7 @@ class TestResidueWiring(BrainTestBase):
         for i in range(1, 7):  # 6 runs, one note each
             self.brain.write_journal_notes(
                 final_text=_review("note · subj%d · run %d residue" % (i, i)),
-                chain_id='s1e-%s-%d' % (sid[:8], i), scale='s1', session_id=sid)
+                chain_id='s1e-%s-%d' % (session_short(sid), i), scale='s1', session_id=sid)
         notes = self.brain.journal_notes(scale='s1', session_id=sid)
         runs = {n['note'] for n in notes}
         assert 'run 1 residue' not in runs          # oldest dropped (K=5)
@@ -197,7 +201,7 @@ class TestSessionArcWriteDoor(BrainTestBase):
                 '## Review\n```\ndoubt · arc-fence · watch for drift\n```\nDONE')
         self.brain.write_session_arc(final_text=text, session_id=sid)
         self.brain.write_journal_notes(final_text=text,
-                                       chain_id='s1e-%s-5' % sid[:8],
+                                       chain_id='s1e-%s-5' % session_short(sid),
                                        scale='s1', session_id=sid)
         assert self.brain.session_context_for(sid) == 'arc write-path built'
         notes = self.brain.journal_notes(scale='s1', session_id=sid)
@@ -213,9 +217,8 @@ class TestSessionArcWriteDoor(BrainTestBase):
         from unittest import mock
         from servers.scales.s1 import encode
         dispatched = []
-        with mock.patch.object(encode, '_gather_messages', return_value=_msgs()), \
-                mock.patch('servers.scales.runner.make_client', return_value=object()), \
-                mock.patch.object(encode, '_lived_turns',
+        with mock.patch('servers.scales.runner.make_client', return_value=object()), \
+                mock.patch.object(self.brain, 'conversation_turns',
                                   side_effect=RuntimeError('trace read failed')), \
                 mock.patch.object(encode, 'run_llm_loop') as loop:
             with self.assertRaises(RuntimeError):

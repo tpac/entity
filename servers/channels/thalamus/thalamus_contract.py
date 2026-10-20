@@ -1,11 +1,11 @@
-"""Thalamus contract — the brain speaking to its streams.
+"""Thalamus contract — the brain speaking to its sessions.
 
 The Thalamus is a durable store of STANDING INTENTS with delivery policy: one
 item can spawn N deliveries over its life (once per session inside a window),
 knows who already got it (the ledger), and can carry an answer back to its
 producer. It sits BESIDE the self-channel, not inside it — the msgs layer is
-streams speaking to each other (ephemeral, consume-once, TTL); the Thalamus is
-the brain speaking to its streams (durable, windowed, ledgered). A live-now
+sessions speaking to each other (ephemeral, consume-once, TTL); the Thalamus is
+the brain speaking to its sessions (durable, windowed, ledgered). A live-now
 fire-and-forget FYI never enters the queue: `file()` delegates it to the
 courier broadcast, where irrelevance-at-send is already the contract.
 
@@ -26,7 +26,7 @@ from datetime import datetime as _dt
 
 from servers.loud_truncation import cap_text_loud, compose_block_loud
 from servers.clock import iso_after, resolve_offset, FUTURE
-from servers.channels.delivery import BOOT as _BOOT, STOP as _STOP
+from servers.channels.delivery import PROMPT as _PROMPT, STOP as _STOP
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -70,7 +70,7 @@ AUDIENCES = (AUDIENCE_FIRST, AUDIENCE_EVERY)  # the closed set the pull
                                               # file() guards the door
 
 def default_audience(needs_answer):
-    """An ask renders at each new session's boot until answered, expired, or
+    """An ask renders at each new session's first prompt until answered, expired, or
     MAX_DELIVERIES_PER_ITEM sessions passed on it; a reminder/notice fires
     once. Both overridable via for_whom."""
     return AUDIENCE_EVERY if needs_answer else AUDIENCE_FIRST
@@ -85,16 +85,19 @@ def default_audience(needs_answer):
 # validates against MOMENTS loudly (a typo'd via would behave as Stop and
 # ledger the typo).
 # ═══════════════════════════════════════════════════════════════
-VIA_BOOT = _BOOT.name
+VIA_PROMPT = _PROMPT.name
 VIA_STOP = _STOP.name
-MOMENTS = (VIA_BOOT, VIA_STOP)
+MOMENTS = (VIA_PROMPT, VIA_STOP)
 # Asks deliver at moments chosen by their AUDIENCE. A broadcast ask (every
-# session) renders at boot only — an architecture question arriving
-# mid-thread trains reflex-deferral; at boot there is no thread. A directed
-# ask (one named session) renders at that session's Stop: the Scribe asking
-# the session it just encoded IS mid-thread by design, and a session you can
-# name has already had its one boot — boot-only would dead-letter it.
-ASK_MOMENTS = {AUDIENCE_EVERY: (VIA_BOOT,),
+# session) renders at the session's first operator prompt only — an
+# architecture question arriving mid-thread trains reflex-deferral; at the
+# first prompt there is no thread yet (it was boot until 2026-10-02, ruling
+# id:15e46fa9: boot cannot tell an operator from a scheduler, the first
+# prompt can). A directed ask (one named session) renders at that session's
+# Stop: the Scribe asking the session it just encoded IS mid-thread by
+# design, and a session you can name has already had its first prompt —
+# first-prompt-only would dead-letter it.
+ASK_MOMENTS = {AUDIENCE_EVERY: (VIA_PROMPT,),
                AUDIENCE_FIRST: (VIA_STOP,)}
 
 
@@ -103,7 +106,7 @@ ASK_MOMENTS = {AUDIENCE_EVERY: (VIA_BOOT,),
 # Thalamus is always open for work, and what a reader is shown is bounded at
 # the read — per moment, and per item across sessions.
 # ═══════════════════════════════════════════════════════════════
-PULL_MAX_ITEMS = 5         # per render moment (boot / stop), overflow named;
+PULL_MAX_ITEMS = 5         # per render moment (prompt / stop), overflow named;
                            # repeat-eligible items rotate fewest-first under it
 MAX_DELIVERIES_PER_ITEM = 16  # an every_session item that this many
                            # sessions saw SINCE IT LAST CAME DUE is DONE: the
@@ -182,7 +185,12 @@ KIND_ASK = 'ask'            # needs an answer (needs_answer)
 KIND_REMINDER = 'reminder'  # carries a clock (deliver_at)
 KIND_NOTICE = 'notice'      # undated FYI
 
-KIND_VERB = {KIND_ASK: 'asks', KIND_REMINDER: 'reminds', KIND_NOTICE: 'notes'}
+# How a part of me is heard when its item renders — first person, from the
+# whole toward the part ("I need to help my healer"), never a producer label.
+# %s is the part's name (part_of). Items I filed myself get no lead.
+KIND_LEAD = {KIND_ASK: 'I need to help my %s:',
+             KIND_REMINDER: 'My %s reminds me:',
+             KIND_NOTICE: 'My %s noticed:'}
 KIND_EXPIRES_DAYS = {KIND_ASK: ASK_EXPIRES_DAYS,
                      KIND_REMINDER: REMIND_GRACE_DAYS,
                      KIND_NOTICE: NOTICE_EXPIRES_DAYS}
@@ -293,6 +301,8 @@ def extend_window(needs_answer, new_deliver, current_expires):
 # ═══════════════════════════════════════════════════════════════
 FOR_WHOM_LIVE = ('live', 'live-now', 'all-live')  # → courier broadcast, no queue row lifecycle
 FOR_WHOM_ALL = 'all'                              # → AUDIENCE_EVERY (window)
+# Every audience word; any other non-empty for_whom names one session.
+FOR_WHOM_WORDS = FOR_WHOM_LIVE + (FOR_WHOM_ALL,)
 
 
 def resolve_for_whom(for_whom, needs_answer):
@@ -311,8 +321,8 @@ def resolve_for_whom(for_whom, needs_answer):
         return 'queue', AUDIENCE_EVERY, ''
     from servers.channels.self_channel.self_contract import is_session_id
     if is_session_id(fw):
-        # Directed: the session-keyed correction (b474ccbd) — full UUID only;
-        # an 8-char short is a display convention, not a key.
+        # Directed: the session-keyed correction (b474ccbd) — full UUID only
+        # here; the remind door (dispatch_thalamus) resolves a short first.
         return 'queue', AUDIENCE_FIRST, fw
     raise ValueError(
         "thalamus: for_whom=%r is not 'live', 'all', or a full session UUID"
@@ -339,18 +349,40 @@ from servers.trace_contract import REF_THALAMUS_DELIVERY
 # Single truncation point, always loud; storage keeps everything.
 # ═══════════════════════════════════════════════════════════════
 
+# The interactive channel's source — what the remind tool files under on
+# every install. A channel label, not the agent's name: 'anchor' is the
+# daemon's main-chat stamp whatever the agent is called (brain node
+# efafd723; renaming it is a deferred, deliberate change).
+INTERACTIVE_SOURCE = 'anchor'
+PART_NAMES = {'encoder:sonnet': 'scribe'}  # sources that don't name a part
+
+
+def part_of(source):
+    """The part of me a producer is, by name — 's2:healer' → 'healer',
+    's2:community_detection' → 'community detection'. The Scribe's source
+    names its model, not its part, so it is mapped. '' for items I filed
+    myself (INTERACTIVE_SOURCE): they are already mine and render without a
+    lead."""
+    if source == INTERACTIVE_SOURCE:
+        return ''
+    if source in PART_NAMES:
+        return PART_NAMES[source]
+    return (source or '').split(':')[-1].replace('_', ' ')
+
+
 def render_item(item):
-    """One due item. The verb points at Anchor and the exit is inline —
-    items arrive as asks/notices with affordances, not status to read past.
+    """One due item: the id to recognize it by, then the note as my own —
+    a part of me speaking ("I need to help my healer: …"), the exit inline.
     Formats what it is handed: refs arrive pre-resolved as 'ref_lines'
     (pull() owns resolution — batched, veil-aware; the contract never
     reaches into the brain)."""
     body = cap_text_loud(
         (item.get('body') or '').strip(), BODY_MAX,
         marker='…[+%d chars — thalamus_list shows it in full]')
-    verb = KIND_VERB[kind_of(item)]
-    head = '• %s · %s %s' % (item.get('id', '?'), item.get('source', '?'), verb)
-    lines = [head, '  "%s"' % body]
+    part = part_of(item.get('source', ''))
+    if part:
+        body = '%s %s' % (KIND_LEAD[kind_of(item)] % part, body)
+    lines = ['• %s' % item.get('id', '?'), '  %s' % body]
     for ref_line in item.get('ref_lines') or []:
         lines.append('  ↳ %s' % ref_line)
     if item.get('needs_answer'):
@@ -362,28 +394,28 @@ def render_item(item):
     return '\n'.join(lines)
 
 
-_HEAD = '🧠 from the brain (thalamus) — %d item(s)'
-# The reader's standing instruction, the mirror of the self-channel's note
-# line. An item's render is a work order addressed to the entity (id, verb,
-# exit call); a human hears only the question and its stakes — the envelope
-# leaking into the operator channel is the defect this line prevents
-# (brain node 3e549ac4). The second line names the read routes so an item
-# is explorable without guessing at tools.
+def _head(n):
+    return '📝 note to self' if n == 1 else '📝 notes to self (%d)' % n
+
+
+# My standing instruction for what arrives: these are my own notes, mine to
+# handle unless I need help — a part reports to the whole, nobody relays
+# (brain node ee325c5c). %s is the counterpart's name. The second line names
+# the read routes so an item is explorable without guessing at tools.
 _HEAD_NOTE = (
-    '   — to the operator, say it in plain words: what is asked and why it '
-    'matters; never the id, the moment, or the producer.\n'
+    '   If I need help I should ask %s, otherwise I should quickly look into '
+    'this on the next pause and handle it.\n'
     '     Explore: get_nodes(↳ refs) or recall(the question) for context · '
     'thalamus_list for the queue · '
     "recall_episodes(ref_type='thalamus_delivery') for who saw it · "
     'thalamus_resolve to act.')
 
 
-def render_block(items, overflow=0, cap=BLOCK_MAX):
+def render_block(items, overflow=0, cap=BLOCK_MAX, counterpart=''):
     """Compose due items into ONE budgeted block. Two loud caps — per item
     (BODY_MAX, in render_item) and whole block (`cap`); overflow items are
-    named at the tail, never silently cut. Items are from the brain's own
-    machinery (not a stream) — rendered under a brain head so origin is
-    honest.
+    named at the tail, never silently cut. `counterpart` is who I'd ask
+    for help ('' → 'my operator').
 
     Returns (block, kept) — kept is how many items actually rendered ('' and
     0 when items is empty). The caller must ledger ONLY the kept items: a
@@ -394,11 +426,12 @@ def render_block(items, overflow=0, cap=BLOCK_MAX):
     # Budget against the widest possible head, then rebuild it from the
     # kept count — the head must claim what the block SHOWS, never what
     # was fetched (head, tail, ledger, and pull's count all say `kept`).
+    note = _HEAD_NOTE % (counterpart or 'my operator')
     body, kept, dropped = compose_block_loud(
         items, render_item, cap,
-        reserved=len(_HEAD % len(items)) + len(_HEAD_NOTE))
-    head = _HEAD % kept
+        reserved=len(_head(len(items))) + len(note))
+    head = _head(kept)
     tail = dropped + max(0, overflow)
     if tail:
         body += '\n\n(+%d more due — thalamus_list shows them)' % tail
-    return '%s\n%s\n\n%s' % (head, _HEAD_NOTE, body), kept
+    return '%s\n%s\n\n%s' % (head, note, body), kept

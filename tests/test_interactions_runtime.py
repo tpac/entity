@@ -228,9 +228,14 @@ class TestS1RunsRecordTheirInteraction:
              'read_calls': [], 'final_text': 'done', 'elapsed_ms': 1,
              'input_tokens': 0, 'output_tokens': 0, 'cache_read_tokens': 0,
              'cache_creation_tokens': 0, 'model': 'claude-test'}
-    _MSGS = [{'role': 'user', 'content': 'hi', 'trace_id': 'aaaaaaaa',
-              'judge_output': None},
-             {'role': 'assistant', 'content': 'hello', 'trace_id': 'bbbbbbbb'}]
+    _WINDOW = [{'user': {'id': 'aaaaaaaa', 'ref_type': 'user_message', 'chain_id': 's0-test-0',
+                    'created_at': '2026-10-19T00:00:00+00:00', 'metadata': {},
+                    'summary': 'hi', 'content': 'hi', 'judge_output': None},
+           'with': [], 'actions': [],
+           'assistant': {'id': 'bbbbbbbb', 'ref_type': 'assistant_message',
+                         'chain_id': 's0-test-0', 'metadata': {},
+                         'created_at': '2026-10-19T00:00:01+00:00',
+                         'summary': 'hello', 'content': 'hello'}}]
 
     @pytest.fixture(autouse=True)
     def setup_brain(self):
@@ -258,7 +263,7 @@ class TestS1RunsRecordTheirInteraction:
                 interaction_override(brain, 's1e_gist', template='GIST-ARM\n'):
             enc = brain.get_interaction_stamp('s1e')
             gist = brain.get_interaction_stamp('s1e_gist')
-            with mock.patch.object(encode, '_gather_messages', return_value=self._MSGS), \
+            with mock.patch.object(encode, '_window', return_value=self._WINDOW), \
                     mock.patch('servers.scales.runner.make_client', return_value=object()), \
                     mock.patch.object(encode, 'run_llm_loop', side_effect=loop), \
                     mock.patch.object(brain, '_resolve_interaction',

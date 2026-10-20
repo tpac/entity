@@ -32,16 +32,17 @@ import * as explorer from '/static/tabs/explorer.js';
 import * as logs     from '/static/tabs/logs.js';
 import * as overview from '/static/tabs/overview.js';
 import * as traces   from '/static/tabs/traces.js';
-import * as streams  from '/static/tabs/streams.js';
+import * as sessions  from '/static/tabs/sessions.js';
 import * as thalamus from '/static/tabs/thalamus.js';
+import * as config   from '/static/tabs/config.js';
 
 // ── Tab registry ──────────────────────────────────────────────────────
 // `graph` is NOT a top-level tab — it lives inside Live as the left pane.
 // It's still a module because Live needs to drive its activate/resize
 // lifecycle.
-// Primary tabs (visible top-of-page): live, streams, thalamus, s2, traces, logs.
+// Primary tabs (visible top-of-page): live, sessions, thalamus, s2, traces, logs, config.
 // Overflow tabs (in the ⋯ dropdown):  journals, explorer, overview.
-const TABS = { live, s2, journals, graph, explorer, logs, overview, traces, streams, thalamus };
+const TABS = { live, s2, journals, graph, explorer, logs, overview, traces, sessions, thalamus, config };
 const OVERFLOW_TABS = ['journals', 'explorer', 'overview'];
 let activeTab = 'live';
 
@@ -137,7 +138,7 @@ async function loadStats() {
 
 // Session identity is a registry, not a dropdown — lib/sessions.js merges the
 // persisted env (worktree/branch/project) with live presence and publishes
-// `sessions:tick`. Every consumer (stream rail, moment chips, traces filter)
+// `sessions:tick`. Every consumer (session rail, moment chips, traces filter)
 // reads the same record, so a session's name is resolved once per page.
 
 // ── Inline-handler exposure ───────────────────────────────────────────
@@ -177,9 +178,9 @@ window.loadTraces            = traces.loadTraces;
 window._loadMoreTraces       = traces._loadMoreTraces;
 window._revealTrace          = traces.revealTrace;
 window.setTraceMode          = traces.setTraceMode;
-window.loadStreams           = streams.loadStreams;
-window.onStreamsSend         = streams.onStreamsSend;
-window.onStreamsSendKey      = streams.onStreamsSendKey;
+window.loadSessions           = sessions.loadSessions;
+window.onSessionsSend         = sessions.onSessionsSend;
+window.onSessionsSendKey      = sessions.onSessionsSendKey;
 window.loadThalamus          = thalamus.loadThalamus;
 
 // ── Boot ──────────────────────────────────────────────────────────────
@@ -196,8 +197,8 @@ for (const name of Object.keys(TABS)) {
   try { TABS[name]?.init?.(); } catch(e) { console.error('[app] init', name, 'failed:', e); }
 }
 
-// Resolve session identity before the first paint. Every surface (stream rail,
-// moment chips, Traces dropdown, Streams roster) reads names from the registry,
+// Resolve session identity before the first paint. Every surface (session rail,
+// moment chips, Traces dropdown, Sessions roster) reads names from the registry,
 // so without this first pass they all render raw hex for one poll interval.
 sessionRegistry.refresh();
 

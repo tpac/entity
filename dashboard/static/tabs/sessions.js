@@ -1,51 +1,51 @@
 // ===========================================================================
-// tabs/streams.js — the self↔self channel, read as a MESSAGING APP.
+// tabs/sessions.js — the self↔self channel, read as a MESSAGING APP.
 // ---------------------------------------------------------------------------
 // Two columns, the shape every chat app has trained the operator on:
 //
-//   rail  — the CONVERSATION LIST. One row per stream of thought, plus
+//   rail  — the CONVERSATION LIST. One row per session, plus
 //           `Everyone` (the broadcasts) and `All messages` (the merged
-//           feed). Each row carries the stream's liveness light, its last
+//           feed). Each row carries the session's liveness light, its last
 //           message and when — so one column answers both "who is live" and
 //           "who is talking to whom".
 //
-//   main  — the OPEN THREAD. A stream's thread holds every message it sent or
-//           received; above it, that stream's own pane (arc, cwd, turns, and
+//   main  — the OPEN THREAD. A session's thread holds every message it sent or
+//           received; above it, that session's own pane (arc, cwd, turns, and
 //           its boot context on click) is the thread header, the way a chat
 //           app shows contact info. Oldest at the top, newest above a pinned
 //           composer addressed to whoever the thread is with.
 //
-// Messages read as bubbles in their SENDER's hue — the same hue the stream
+// Messages read as bubbles in their SENDER's hue — the same hue the session
 // carries in the rail, the Live feed and the graph. Delivery shows as a read
-// receipt: ✓ sent, ✓✓ actually consumed by a stream.
+// receipt: ✓ sent, ✓✓ actually consumed by a session.
 //
 // The composer is the dashboard's one write path (POST /api/self-send → daemon
 // self_send). The operator sends attributed ('operator-dashboard'), never as a
-// stream of thought — those messages render as the reader's own, on the right.
+// session — those messages render as the reader's own, on the right.
 // ===========================================================================
 
 import { api } from '/static/lib/api.js';
 import { poll } from '/static/lib/poll.js';
 import { escapeHtml, relativeTime, localTime } from '/static/lib/dom.js';
-import { sessionLabel, sessionColor, sessionTooltip, sessionInfo } from '/static/lib/sessions.js';
-import { renderPane } from '/static/lib/stream_roster.js';
+import { sessionLabel, sessionColor, sessionTooltip, sessionInfo, sessionShort } from '/static/lib/sessions.js';
+import { renderPane } from '/static/lib/session_roster.js';
 
 // The label server.py stamps on an operator-authored send (never a session id).
 const OPERATOR = 'operator-dashboard';
 // The two pseudo-threads that aren't a single counterpart.
 const ALL = 'all';
 const EVERYONE = 'everyone';
-const _THREAD_KEY = 'dashboard.streamsThread';
+const _THREAD_KEY = 'dashboard.sessionsThread';
 
 // Roster + message state. _lastPresence / _lastMessages let a thread switch
 // re-render synchronously without re-fetching; _headOpen tracks whether the
 // thread header's pane is drilled open (it survives the 5s poll, which rebuilds
-// wholesale); _bootCache holds per-stream boot renders fetched on first drill.
+// wholesale); _bootCache holds per-session boot renders fetched on first drill.
 let _lastPresence = null;
 let _lastMessages = [];
 const _headOpen = new Set();
 const _bootCache = {};
-const _ownChatCache = {};   // sid → that stream's own operator turns (identity cue)
+const _ownChatCache = {};   // sid → that session's own operator turns (identity cue)
 const _msgExpanded = new Set();   // message ids whose body is expanded
 
 let _activeThread = ALL;
@@ -66,29 +66,29 @@ function _msgSignature() {
     + _lastMessages.reduce((n, m) => n + (m.delivered ? m.delivered.length : 0), 0);
 }
 function _presenceSignature() {
-  const streams = (_lastPresence && _lastPresence.streams) || [];
+  const sessions = (_lastPresence && _lastPresence.sessions) || [];
   const lost = (_lastPresence && _lastPresence.lost) || [];
-  return streams.map(s => [s.session_id, s.state, s.turn_count, s.pending_inbox_count,
+  return sessions.map(s => [s.session_id, s.state, s.turn_count, s.pending_inbox_count,
     s.focus, (s.arc || '').length].join(':')).join('|')
     + '#lost:' + lost.length + '#msg:' + _msgSignature();
 }
 
 // ── Identity ───────────────────────────────────────────────────────────
 // The session REGISTRY (lib/sessions.js) owns handle resolution — the same one
-// the stream rail and every moment chip use, so a stream is one identity
-// wherever it appears, live or long gone. The operator is not a stream: they
+// the session rail and every moment chip use, so a session is one identity
+// wherever it appears, live or long gone. The operator is not a session: they
 // get their own name.
 function _handleForSession(sid) {
   if (!sid) return '?';
   if (sid === OPERATOR) return 'You';
-  return sessionLabel(sid) || sid.slice(0, 8);
+  return sessionLabel(sid);
 }
 
 function _colorForSession(sid) {
   return sid === OPERATOR ? 'var(--accent-green)' : sessionColor(sid || '');
 }
 
-// Two letters of the handle — enough to tell two streams apart at a glance
+// Two letters of the handle — enough to tell two sessions apart at a glance
 // without turning the avatar into another label.
 function _initials(sid) {
   if (sid === OPERATOR) return '🧑';
@@ -96,29 +96,29 @@ function _initials(sid) {
   return (h.slice(0, 2) || '??').toUpperCase();
 }
 
-// The presence record for a stream, or a synthetic one for a session that only
-// exists in message history (the daemon's roster is live streams + recently
+// The presence record for a session, or a synthetic one for a session that only
+// exists in message history (the daemon's roster is live sessions + recently
 // lost; a week-old sender is neither).
-function _streamRecord(sid) {
+function _sessionRecord(sid) {
   const p = _lastPresence || {};
-  const found = (p.streams || []).find(s => s.session_id === sid)
+  const found = (p.sessions || []).find(s => s.session_id === sid)
     || (p.lost || []).find(s => s.session_id === sid);
-  return found || { session_id: sid, short: sid.slice(0, 8), state: 'lost' };
+  return found || { session_id: sid, short: sessionShort(sid), state: 'lost' };
 }
 
 // ── Threads ────────────────────────────────────────────────────────────
 // Which conversation(s) a message belongs to. A broadcast lives in Everyone;
-// a directed message lives in BOTH parties' threads — a stream's thread is
+// a directed message lives in BOTH parties' threads — a session's thread is
 // everything it said or heard, which is the question the operator is asking
-// when they click a stream.
+// when they click a session.
 function _threadKeysOf(m) {
-  const from = m.from_full || m.from || '';
+  const from = m.from_full || '';
   const push = (keys, k) => {
     if (k && k !== OPERATOR && !keys.includes(k)) keys.push(k);
     return keys;
   };
   // A broadcast belongs to Everyone AND to each party it actually touched —
-  // its sender and the streams that consumed it. A stream's thread claims to
+  // its sender and the sessions that consumed it. A session's thread claims to
   // be everything it said or heard, so a broadcast it received belongs there
   // too; leaving it only in Everyone made that claim false.
   if (m.address === 'self:broadcast') {
@@ -134,7 +134,7 @@ function _messagesFor(key) {
   return _lastMessages.filter(m => _threadKeysOf(m).includes(key));
 }
 
-// One row's worth of data per conversation, newest-first among the streams.
+// One row's worth of data per conversation, newest-first among the sessions.
 function _conversations() {
   const byKey = new Map();
   const touch = (key) => {
@@ -151,38 +151,38 @@ function _conversations() {
       if (!(m.delivered || []).length && (m.address || '') === 'self:' + key) c.pending++;
     }
   }
-  // Every live (and recently lost) stream gets a row even with nothing said —
+  // Every live (and recently lost) session gets a row even with nothing said —
   // an empty conversation you can open and start is the point of a contact list.
-  for (const s of ((_lastPresence && _lastPresence.streams) || [])
+  for (const s of ((_lastPresence && _lastPresence.sessions) || [])
                   .concat((_lastPresence && _lastPresence.lost) || [])) {
     touch(s.session_id);
   }
 
   const rows = [...byKey.values()].filter(c => c.key !== EVERYONE);
   for (const c of rows) {
-    const rec = _streamRecord(c.key);
+    const rec = _sessionRecord(c.key);
     c.state = rec.state || 'lost';
     c.focus = rec.focus || '';
     // pending_inbox_count is the daemon's own count of what's waiting for a
-    // live stream — authoritative where we have it.
+    // live session — authoritative where we have it.
     if (rec.pending_inbox_count) c.pending = rec.pending_inbox_count;
     c.sortAt = (c.last && c.last.created_at) || rec.updated_at || '';
   }
   rows.sort((a, b) => {
-    // Live streams float above dormant/lost ones; within a band, most recent.
+    // Live sessions float above dormant/lost ones; within a band, most recent.
     const rank = s => (s === 'active' ? 0 : s === 'dormant' ? 1 : 2);
     return rank(a.state) - rank(b.state) || (b.sortAt || '').localeCompare(a.sortAt || '');
   });
 
   const everyone = byKey.get(EVERYONE) || { key: EVERYONE, count: 0, last: null, pending: 0 };
-  return { streams: rows, everyone };
+  return { sessions: rows, everyone };
 }
 
 // ── Conversation list (the rail) ───────────────────────────────────────
 // The row's second line. With messages it previews the latest one. Without
-// any, it shows IDENTITY CUES — model, turns, hex — never the stream's arc or
+// any, it shows IDENTITY CUES — model, turns, hex — never the session's arc or
 // focus: those are built from the operator's own prompts, and a row that
-// echoes the operator's words back where a message goes reads as if the stream
+// echoes the operator's words back where a message goes reads as if the session
 // had said them. Cues are what tells the operator which session this is.
 function _previewOf(c) {
   if (!c.last) {
@@ -191,13 +191,13 @@ function _previewOf(c) {
     if (info.model) cues.push(info.model);
     const turns = info.turns || 0;
     if (turns) cues.push(turns + ' turn' + (turns === 1 ? '' : 's'));
-    cues.push(info.short || c.key.slice(0, 8));
+    cues.push(sessionShort(c.key));
     return { text: cues.join(' · '), cls: ' conv-preview--cues' };
   }
   // The mixed feeds (All / Everyone) name their speaker — without it the row
-  // shows a body with no way to tell which stream said it. A single stream's
+  // shows a body with no way to tell which session said it. A single session's
   // row doesn't need it: the row IS the speaker.
-  const from = c.last.from_full || c.last.from;
+  const from = c.last.from_full;
   const mixed = c.key === EVERYONE || c.key === ALL;
   const who = from === OPERATOR ? 'You: '
     : (mixed ? _handleForSession(from) + ': ' : '');
@@ -234,17 +234,17 @@ function _convRow(c, { title, glyph, color, live, muted, subtitle }) {
 function _paintConvList() {
   const host = document.getElementById('conv-list');
   if (!host) return;
-  const { streams, everyone } = _conversations();
+  const { sessions, everyone } = _conversations();
 
   const all = { key: ALL, count: _lastMessages.length, pending: 0, last: _lastMessages[0] || null };
   let h = '<div class="conv-section">Conversations</div>';
   h += _convRow(all, { title: 'All messages', glyph: '📚', color: 'var(--text-heading)',
                        subtitle: 'every message in the window' });
   h += _convRow(everyone, { title: 'Everyone', glyph: '🌐', color: 'var(--accent-purple)',
-                            subtitle: 'broadcasts to all live streams' });
+                            subtitle: 'broadcasts to all live sessions' });
 
-  if (streams.length) h += '<div class="conv-section">Streams of thought</div>';
-  for (const c of streams) {
+  if (sessions.length) h += '<div class="conv-section">Sessions</div>';
+  for (const c of sessions) {
     h += _convRow(c, {
       title: _handleForSession(c.key),
       glyph: _initials(c.key),
@@ -266,19 +266,19 @@ function _paintThreadHead() {
   if (_activeThread === ALL) {
     host.innerHTML = '';
     if (title) title.textContent = '💬 All messages';
-    if (sub) sub.textContent = 'what the streams of thought are saying to each other';
+    if (sub) sub.textContent = 'what the sessions are saying to each other';
     return;
   }
   if (_activeThread === EVERYONE) {
     host.innerHTML = '';
     if (title) title.textContent = '🌐 Everyone';
-    if (sub) sub.textContent = 'broadcasts — sent to every stream that was live at the time';
+    if (sub) sub.textContent = 'broadcasts — sent to every session that was live at the time';
     return;
   }
 
-  const rec = _streamRecord(_activeThread);
+  const rec = _sessionRecord(_activeThread);
   if (title) title.textContent = '💬 ' + _handleForSession(_activeThread);
-  if (sub) sub.textContent = 'everything this stream said or heard';
+  if (sub) sub.textContent = 'everything this session said or heard';
   host.innerHTML = renderPane(rec, {
     open: _headOpen.has(_activeThread),
     boots: _bootCache[_activeThread],
@@ -286,11 +286,11 @@ function _paintThreadHead() {
   });
 }
 
-// The stream's own operator turns — refetched every time its thread is opened.
+// The session's own operator turns — refetched every time its thread is opened.
 // Identity, not traffic: it answers "which of my sessions is this?", which the
 // handle and hex alone don't when three of them are called `main`. The cache
 // is for painting instantly while the request is in flight, NOT a one-shot: a
-// not-yet-spoken stream or a failed fetch must not stick for the page's life.
+// not-yet-spoken session or a failed fetch must not stick for the page's life.
 async function _loadOwnChat(sid) {
   if (sid === ALL || sid === EVERYONE) return;
   try {
@@ -309,17 +309,17 @@ async function _loadOwnChat(sid) {
 let _toTouched = false;
 
 function _syncComposerTarget() {
-  const sel = document.getElementById('streams-send-to');
+  const sel = document.getElementById('sessions-send-to');
   if (!sel) return;
   const valid = v => [...sel.options].some(o => o.value === v);
   if (_toTouched) {
     if (valid(sel.value)) return;
     // The hand-picked recipient just left the roster. Retargeting a message
-    // the operator wrote for THAT stream — silently, to everyone — is the one
+    // the operator wrote for THAT session — silently, to everyone — is the one
     // outcome the composer must not produce, so say it out loud.
     _toTouched = false;
-    const status = document.getElementById('streams-send-status');
-    if (status) status.textContent = '⚠ that stream ended — recipient reset, check it before sending';
+    const status = document.getElementById('sessions-send-status');
+    if (status) status.textContent = '⚠ that session ended — recipient reset, check it before sending';
   }
   const target = (_activeThread === ALL || _activeThread === EVERYONE) ? 'broadcast' : _activeThread;
   sel.value = valid(target) ? target : 'broadcast';
@@ -331,10 +331,10 @@ function _setThread(key) {
   try { localStorage.setItem(_THREAD_KEY, key); } catch (_) { /* private mode */ }
 
   _syncComposerTarget();
-  const input = document.getElementById('streams-send-body');
+  const input = document.getElementById('sessions-send-body');
   if (input) {
     input.placeholder = (key === ALL || key === EVERYONE)
-      ? 'Say something to every live stream…'
+      ? 'Say something to every live session…'
       : 'Message ' + _handleForSession(key) + '…';
   }
 
@@ -344,7 +344,7 @@ function _setThread(key) {
   _loadOwnChat(key);
 }
 
-export async function loadStreams() {
+export async function loadSessions() {
   await _loadMessages();    // load first so the rail has previews to render
   await _loadPresence();
 }
@@ -359,17 +359,17 @@ async function _loadPresence() {
     _lastPresenceFp = fp;
     _paintConvList();
     _paintThreadHead();
-  } catch (e) { console.error('[streams] presence', e); }
+  } catch (e) { console.error('[sessions] presence', e); }
 }
 
 // Handle-first dropdown (branch · focus). Preserve selection across refreshes.
 function _syncSendDropdown(p) {
-  const sel = document.getElementById('streams-send-to');
+  const sel = document.getElementById('sessions-send-to');
   if (!sel) return;
   const current = sel.value;
   let html = '<option value="broadcast">everyone (broadcast)</option>';
-  for (const s of (p && p.streams) || []) {
-    const handle = (s.branch && s.branch !== 'unknown') ? s.branch : (s.short || s.session_id.substring(0, 8));
+  for (const s of (p && p.sessions) || []) {
+    const handle = (s.branch && s.branch !== 'unknown') ? s.branch : s.short;
     const focus = s.focus ? ' — ' + s.focus.substring(0, 40) : '';
     html += '<option value="' + escapeHtml(s.session_id) + '">' + escapeHtml(handle) + escapeHtml(focus) + '</option>';
   }
@@ -386,11 +386,11 @@ function _onConvClick(e) {
   if (key && key !== _activeThread) _setThread(key);
 }
 
-// Click the thread header's title bar → drill into that stream's boot context.
+// Click the thread header's title bar → drill into that session's boot context.
 async function _onThreadHeadClick(e) {
-  const bar = e.target.closest('[data-stream-toggle]');
+  const bar = e.target.closest('[data-session-toggle]');
   if (!bar) return;
-  const sid = bar.getAttribute('data-stream-toggle');
+  const sid = bar.getAttribute('data-session-toggle');
   if (!sid) return;
   if (_headOpen.has(sid)) {
     _headOpen.delete(sid);
@@ -411,7 +411,7 @@ async function _onThreadHeadClick(e) {
 // ── Messages (courier + delivery fan-out) ──────────────────────────────
 async function _loadMessages() {
   try {
-    const hours = document.getElementById('streams-hours').value;
+    const hours = document.getElementById('sessions-hours').value;
     const body = await api.selfMessages({ hours });
     _lastMessages = (body && body.messages) || [];
     const fp = _msgSignature();
@@ -419,7 +419,7 @@ async function _loadMessages() {
     _lastMsgFp = fp;
     _paintConvList();
     _paintMessages();
-  } catch (e) { console.error('[streams] messages', e); }
+  } catch (e) { console.error('[sessions] messages', e); }
 }
 
 // A body longer than this (or taller than the clamp) gets a "show more"
@@ -450,10 +450,10 @@ function _dayLabel(iso) {
 // oldest-first, so it's flipped here and the scroll is parked at the bottom.
 function _paintMessages() {
   const msgs = _messagesFor(_activeThread);
-  const countEl = document.getElementById('streams-count');
+  const countEl = document.getElementById('sessions-count');
   if (countEl) countEl.textContent = msgs.length + ' message' + (msgs.length === 1 ? '' : 's');
 
-  const host = document.getElementById('feed-streams-messages');
+  const host = document.getElementById('feed-sessions-messages');
   if (!host) return;
 
   // A NEW conversation always opens at its newest message. Without this the
@@ -470,9 +470,9 @@ function _paintMessages() {
       + '<div class="chat-empty-title">Nothing said yet</div>'
       + '<div class="chat-empty-sub">'
       + (_activeThread === ALL || _activeThread === EVERYONE
-          ? 'When streams of thought message each other it shows up here. You can start the '
+          ? 'When sessions message each other it shows up here. You can start the '
             + 'conversation below — older messages reap after their TTL, and survive only as S0 traces.'
-          : 'Nothing to or from this stream in the window. Say something below, or widen the '
+          : 'Nothing to or from this session in the window. Say something below, or widen the '
             + 'time range — messages reap after their TTL and survive only as S0 traces.')
       + '</div></div>';
     return;
@@ -506,13 +506,13 @@ function _paintMessages() {
 // the same sender to the same recipient within 4 minutes drops the header, the
 // way any chat groups a burst.
 function _renderMessage(m, prev) {
-  const from = m.from_full || m.from || '';
+  const from = m.from_full || '';
   const broadcast = m.address === 'self:broadcast';
   const toSid = broadcast ? '' : (m.address || '').replace(/^self:/, '');
   const mine = from === OPERATOR;
   const hue = _colorForSession(from);
 
-  const grouped = !!prev && (prev.from_full || prev.from || '') === from
+  const grouped = !!prev && (prev.from_full || '') === from
     && prev.address === m.address
     && Math.abs(new Date(m.created_at) - new Date(prev.created_at)) < 4 * 60000;
 
@@ -539,13 +539,13 @@ function _renderMessage(m, prev) {
     ? '<div class="chat-refs">refs: ' + m.refs.map(r => escapeHtml(String(r))).join(', ') + '</div>'
     : '';
 
-  // Delivery as a read receipt: ✓✓ once a stream has actually consumed it.
+  // Delivery as a read receipt: ✓✓ once a session has actually consumed it.
   const delivered = m.delivered || [];
   const receipt = delivered.length
     ? '<div class="chat-receipt chat-receipt--read">✓✓ read by '
         + delivered.map(d => '<span title="' + escapeHtml(d.to_full || '') + ' @ '
             + escapeHtml(d.at || '') + '">'
-            + escapeHtml(_handleForSession(d.to_full) || d.to) + '</span>').join(', ')
+            + escapeHtml(_handleForSession(d.to_full)) + '</span>').join(', ')
       + '</div>'
     : '<div class="chat-receipt chat-receipt--sent">✓ sent · not read yet</div>';
 
@@ -577,14 +577,14 @@ function _onMessagesClick(e) {
 }
 
 // ── Send composer (the one write path) ─────────────────────────────────
-export function onStreamsSendKey(event) {
-  if (event && event.key === 'Enter') { event.preventDefault(); onStreamsSend(); }
+export function onSessionsSendKey(event) {
+  if (event && event.key === 'Enter') { event.preventDefault(); onSessionsSend(); }
 }
 
-export async function onStreamsSend() {
-  const toEl = document.getElementById('streams-send-to');
-  const bodyEl = document.getElementById('streams-send-body');
-  const statusEl = document.getElementById('streams-send-status');
+export async function onSessionsSend() {
+  const toEl = document.getElementById('sessions-send-to');
+  const bodyEl = document.getElementById('sessions-send-body');
+  const statusEl = document.getElementById('sessions-send-status');
   const to = toEl ? toEl.value : '';
   const body = bodyEl ? bodyEl.value.trim() : '';
   if (!body) { if (statusEl) statusEl.textContent = 'type a message first'; return; }
@@ -596,10 +596,10 @@ export async function onStreamsSend() {
       statusEl.textContent = '✓ sent to ' + (to === 'broadcast' ? 'everyone' : _handleForSession(to));
       setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
     }
-    await loadStreams();   // refresh the thread AND the rail's previews
+    await loadSessions();   // refresh the thread AND the rail's previews
   } catch (e) {
     if (statusEl) statusEl.textContent = '✗ ' + (e.message || 'send failed');
-    console.error('[streams] send', e);
+    console.error('[sessions] send', e);
   }
 }
 
@@ -617,29 +617,29 @@ export function init() {
     head.addEventListener('click', _onThreadHeadClick);
     head._headClickBound = true;
   }
-  const msgFeed = document.getElementById('feed-streams-messages');
+  const msgFeed = document.getElementById('feed-sessions-messages');
   if (msgFeed && !msgFeed._msgClickBound) {
     msgFeed.addEventListener('click', _onMessagesClick);
     msgFeed._msgClickBound = true;
   }
-  const sendTo = document.getElementById('streams-send-to');
+  const sendTo = document.getElementById('sessions-send-to');
   if (sendTo && !sendTo._toChangeBound) {
     sendTo.addEventListener('change', () => { _toTouched = true; });
     sendTo._toChangeBound = true;
   }
   poll.register({
-    key: 'streams',
+    key: 'sessions-tab',
     interval: 5000,
     activeWhen: () => {
-      const tab = document.getElementById('tab-streams');
+      const tab = document.getElementById('tab-sessions');
       return tab && tab.classList.contains('active');
     },
-    fetcher: loadStreams,
+    fetcher: loadSessions,
   });
 }
 
 export function activate() {
   _setThread(_activeThread);   // restores the composer + titles for the saved thread
-  loadStreams();
+  loadSessions();
 }
 export function deactivate() {}

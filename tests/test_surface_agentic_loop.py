@@ -183,6 +183,77 @@ class TestFinalRoundDiscipline:
         assert any(w[0] == 'surface_empty_tool_use' for w in brain.warnings)
 
 
+class TestEffortAndThinking:
+    """effort/thinking reach every round when set; unset, the request
+    carries neither (Haiku 4.5 rejects effort)."""
+
+    def test_unset_sends_neither(self, monkeypatch):
+        monkeypatch.setattr(
+            fetch_tools_mod, 'execute_tool',
+            lambda *a, **kw: {'results': [], 'latency_ms': 1})
+        client = FakeClient([tool_use_response(), text_response()])
+        run_loop(client, FakeBrain(), [])
+        for call in client.calls:
+            assert 'thinking' not in call
+            assert 'effort' not in call['output_config']
+
+    def test_set_rides_every_round(self, monkeypatch):
+        monkeypatch.setattr(
+            fetch_tools_mod, 'execute_tool',
+            lambda *a, **kw: {'results': [], 'latency_ms': 1})
+        client = FakeClient([tool_use_response(), text_response()])
+        surface_mod._call_surface_agentic(
+            client, FakeBrain(), [], 'SYSTEM', 'USER CONTENT', 4096,
+            'sess-test', 'claude-haiku-5-5',
+            effort='low', thinking={'type': 'disabled'})
+        assert len(client.calls) == 2
+        for call in client.calls:
+            assert call['output_config']['effort'] == 'low'
+            assert call['output_config']['format']['type'] == 'json_schema'
+            assert call['thinking'] == {'type': 'disabled'}
+
+    def test_telemetry_records_the_effort_sent(self):
+        _, _, tel = surface_mod._call_surface_agentic(
+            FakeClient([text_response()]), FakeBrain(), [], 'SYSTEM',
+            'USER CONTENT', 4096, 'sess-test', 'claude-haiku-5-5',
+            effort='medium')
+        assert tel['effort'] == 'medium'
+        assert tel['model'] == 'claude-haiku-5-5'
+        _, _, tel = run_loop(FakeClient([text_response()]), FakeBrain(), [])
+        assert tel['effort'] == ''
+
+
+class TestStopsWithoutSelection:
+    """A max_tokens or refusal stop leaves no selection; each is logged by
+    name instead of surfacing nothing silently."""
+
+    def _stopped(self, stop_reason):
+        return SimpleNamespace(
+            stop_reason=stop_reason,
+            content=[SimpleNamespace(type='thinking', thinking='')],
+            usage=FakeUsage(output_tokens=600))
+
+    def test_truncation_is_logged(self):
+        brain = FakeBrain()
+        raw, trace, tel = run_loop(
+            FakeClient([self._stopped('max_tokens')]), brain, [])
+        assert raw == ''
+        assert tel['truncated'] == 1
+        assert [e[0] for e in brain.errors] == ['surface_truncation']
+
+    def test_refusal_is_logged(self):
+        brain = FakeBrain()
+        raw, trace, tel = run_loop(
+            FakeClient([self._stopped('refusal')]), brain, [])
+        assert raw == ''
+        assert [e[0] for e in brain.errors] == ['surface_refusal']
+
+    def test_normal_stop_logs_nothing(self):
+        brain = FakeBrain()
+        run_loop(FakeClient([text_response()]), brain, [])
+        assert brain.errors == []
+
+
 class TestPerRoundTelemetry:
     """Each tool_trace record carries its API call's cost (2026-07-11):
     total_ms + the four USAGE_FIELDS, mirroring run_llm_loop's
@@ -262,3 +333,39 @@ class TestFloorAndAttribution:
         assert not any(w[0] == 'surface_floor_dropped_all'
                        for w in brain.warnings)
         assert len(pool_after) == 4
+
+
+class TestUnparseableVsTruncated:
+    """_call_surface logs an unparseable reply once, by its real cause: a
+    reply cut off mid-JSON is the loop's surface_truncation, not also
+    surface_haiku_unparseable."""
+
+    class _Brain(FakeBrain):
+        def get_interaction_effective(self, name):
+            return {'template': 'SYSTEM', 'config': {'layout': 'xml_v13'},
+                    'stamp': {}}
+
+        def _ensure_anthropic_client(self):
+            return None
+
+        def get_config(self, key, default=None):
+            return default
+
+    def _run(self, monkeypatch, raw, truncated):
+        monkeypatch.setattr(
+            surface_mod, '_call_surface_agentic',
+            lambda *a, **kw: (raw, [], {'truncated': truncated}))
+        brain = self._Brain()
+        surfaced, *_ = surface_mod._call_surface(
+            brain, [], 'msg', [], 'sess-t', {})
+        return surfaced, [e[0] for e in brain.errors]
+
+    def test_cut_off_reply_is_not_also_unparseable(self, monkeypatch):
+        surfaced, errors = self._run(monkeypatch, '{"selected":[{"id":', 1)
+        assert surfaced == {'selected': []}
+        assert 'surface_haiku_unparseable' not in errors
+
+    def test_whole_garbled_reply_is_unparseable(self, monkeypatch):
+        surfaced, errors = self._run(monkeypatch, 'no json here', 0)
+        assert surfaced == {'selected': []}
+        assert errors == ['surface_haiku_unparseable']

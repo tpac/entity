@@ -395,7 +395,8 @@ class TestSelectorConversationCaps(unittest.TestCase):
     at 8,000; older turns at their tighter caps."""
 
     def _xml(self, recent, current):
-        built = _build_user_content_xml([], current, recent, None, '', SURFACE)
+        from tests.brain_test_base import turns_of
+        built = _build_user_content_xml([], current, turns_of(recent), None, '', SURFACE)
         return built[0] if isinstance(built, tuple) else built
 
     def test_caps_by_position(self):
@@ -448,6 +449,7 @@ class TestShownIsSelected(BrainTestBase):
 
     def _run(self, session_id, candidates, picks, recent_messages=None):
         from servers.scales.s1 import surface as surface_mod
+        from tests.brain_test_base import turns_of
 
         def _fake_call_surface(brain, cands, user_message, recent, sid, result,
                                frame='', scope=None):
@@ -462,7 +464,7 @@ class TestShownIsSelected(BrainTestBase):
         surface_mod._call_surface = _fake_call_surface
         try:
             text = surface_mod.run_surface(
-                self.brain, ctx, candidates, 'user msg', recent_messages or [], {},
+                self.brain, ctx, candidates, 'user msg', turns_of(recent_messages), {},
                 'enriched query', [], 'test-recall-ref', session_id, None,
                 query_vec=None)
         finally:
@@ -516,6 +518,36 @@ class TestShownIsSelected(BrainTestBase):
         outcomes = (deltas[0].get('metadata') or {}).get('outcomes_per_candidate') or {}
         self.assertEqual(outcomes.get(a['id'][:8]), 'selected')
         self.assertEqual(outcomes.get(b['id'][:8]), 'selected')
+
+    def test_picks_past_the_cap_are_gated_in_emission_order(self):
+        from servers.scales.s1.surface_contract import SURFACE
+        cap = SURFACE['max_selected']
+        nodes = [self._remember('cap_%d' % i, 'Cap content %d.' % i)
+                 for i in range(cap + 2)]
+        text, k = self._run('t-over-cap', [self._cand(n) for n in nodes],
+                            [n['id'] for n in nodes])
+        self.assertEqual(set(json.loads(k['ref_id'])),
+                         {n['id'][:8] for n in nodes[:cap]})
+        not_shown = (k.get('metadata') or {}).get('not_shown')
+        for n in nodes[cap:]:
+            self.assertIn({'id': n['id'][:8], 'reason': 'over_cap'}, not_shown)
+            self.assertNotIn('Cap content %d.' % nodes.index(n), text)
+
+    def test_a_gated_pick_does_not_take_a_cap_slot(self):
+        from servers.scales.s1.surface_contract import SURFACE
+        cap = SURFACE['max_selected']
+        nodes = [self._remember('slot_%d' % i, 'Slot content %d.' % i)
+                 for i in range(cap + 1)]
+        recent = [{'role': 'user', 'content': 'earlier turn',
+                   'surfaced': [{'id': nodes[0]['id'][:8], 'title': 'slot_0'}]}]
+        text, k = self._run('t-cap-after-gates',
+                            [self._cand(n) for n in nodes],
+                            [n['id'] for n in nodes], recent_messages=recent)
+        self.assertEqual(set(json.loads(k['ref_id'])),
+                         {n['id'][:8] for n in nodes[1:]})
+        reasons = [e['reason'] for e in
+                   (k.get('metadata') or {}).get('not_shown')]
+        self.assertNotIn('over_cap', reasons)
 
     def test_real_node_situation_never_renders(self):
         # get_node promotes situation to the top-level node key; the inject

@@ -1,10 +1,10 @@
-"""Self-channel views — stream↔stream messages + faithful boot captures.
+"""Self-channel views — session↔session messages + faithful boot captures.
 
-Two read surfaces for the Streams dashboard tab, both over brain_logs.db:
+Two read surfaces for the Sessions dashboard tab, both over brain_logs.db:
 
   - query_messages: the directed-signal courier log (self_inflight, with the
     self_delivered fan-out folded in) — every message, who sent it, to whom,
-    and which streams have consumed it. This is the COMPLETE log of live
+    and which sessions have consumed it. This is the COMPLETE log of live
     traffic; the s0 `self_message` traces (queries.traces) are only the
     delivered-into-Observation subset, so the chat view leans on this.
 
@@ -43,7 +43,6 @@ def query_messages(conn, hours: int = 48, limit: int = 200):
     for mid, to_session, dat in conn.execute(
             "SELECT message_id, to_session, delivered_at FROM self_delivered").fetchall():
         delivered.setdefault(mid, []).append({
-            "to": (to_session or '')[:8],
             "to_full": to_session or '',
             "at": dat,
         })
@@ -57,7 +56,6 @@ def query_messages(conn, hours: int = 48, limit: int = 200):
             refs = []
         out.append({
             "id": mid,
-            "from": (r[1] or '')[:8],
             "from_full": r[1] or '',
             "address": r[2] or '',
             "body": r[3] or '',
@@ -85,7 +83,6 @@ def query_boot_renders(conn, session_id: str = '', limit: int = 30):
     return [{
         "id": r[0],
         "session_id": r[1] or '',
-        "session_short": (r[1] or '')[:8],
         "user": r[2] or '',
         "project": r[3] or '',
         "char_count": r[4] or 0,

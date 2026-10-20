@@ -103,3 +103,22 @@ def test_api_failure_reports_what_the_loop_logged():
     assert result['pass'] is False
     assert 'surface_agentic_api' in result['error']
     assert 'overloaded' in result['error']
+
+
+def test_production_arm_sends_the_shipping_model_and_effort():
+    from servers.scales.s1.surface_contract import (
+        SURFACE_EFFORT, SURFACE_MODEL)
+    client = _Client(_text(PICK))
+    bench.run_one(client, _scenario(), 'SYSTEM')
+
+    assert client.calls[0]['model'] == SURFACE_MODEL
+    assert client.calls[0]['output_config'].get('effort') == SURFACE_EFFORT
+
+
+def test_arm_with_its_own_model_sends_only_its_own_effort():
+    client = _Client(_text(PICK))
+    arm = dict(bench.PRODUCTION_ARM, model='claude-haiku-4-5')
+    bench.run_one(client, _scenario(), 'SYSTEM', arm)
+
+    assert client.calls[0]['model'] == 'claude-haiku-4-5'
+    assert 'effort' not in client.calls[0]['output_config']

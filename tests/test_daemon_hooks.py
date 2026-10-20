@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tests.brain_test_base import BrainTestBase
-from servers.trace_contract import REGISTER_ONLY_FIELD
+from servers.trace_contract import REGISTER_ONLY_FIELD, session_short
 from servers.daemon_hooks import (
     hook_recall, post_response_common,
     hook_worktree_context, hook_worktree_cleanup,
@@ -100,7 +100,7 @@ class TestHookRecallOutput(BrainTestBase):
         """hook_recall writes the user_message S0 trace at prompt-arrival. The
         write moved here from post_response_common (it precedes recall, so it
         holds even on the empty/early-return path) so presence/peek can surface a
-        stream's current prompt mid-turn instead of only after the turn completes."""
+        session's current prompt mid-turn instead of only after the turn completes."""
         sid = 'test-recall-usermsg'
         hook_recall(self.brain, {"prompt": "operator prompt here",
                                  "session_id": sid}, [])
@@ -110,6 +110,20 @@ class TestHookRecallOutput(BrainTestBase):
         self.assertEqual(len(rows), 1)
         self.assertIn("operator prompt here", rows[0][0])
         self.assertNotIn(REGISTER_ONLY_FIELD, json.loads(rows[0][1]))
+
+    def test_hook_recall_cues_recall_on_the_prompts_own_row(self):
+        """The prompt's first row is the recall's cue: the LAF moment stack
+        ends its window just before it, as the Surface's window does."""
+        from unittest.mock import patch
+        sid = 'test-recall-cue'
+        with patch.object(self.brain, 'recall',
+                          wraps=self.brain.recall) as rec:
+            hook_recall(self.brain, {"prompt": "operator prompt here",
+                                     "session_id": sid}, [])
+        row = self.brain.logs_conn.execute(
+            "SELECT id FROM trace_events WHERE scale='s0' AND session_id=? "
+            "AND ref_type='user_message'", (sid,)).fetchone()
+        self.assertEqual(rec.call_args.kwargs['cue_trace_id'], row[0])
 
     def test_register_only_registers_turn_but_skips_recall_and_surface(self):
         """Short answers ('yes') routed with register_only=True must REGISTER the
@@ -292,14 +306,14 @@ class TestScribeReactor(unittest.TestCase):
     conversational count, sub-threshold never fires, one encode runs at a time
     across sessions (a busy session re-qualifies and drains on a later poll) —
     and adds the idle-tail clause. scribe_due reads only HIGHER session
-    functions (present_streams + turns_since_last_encode + get_conversation),
+    functions (present_sessions + turns_since_last_encode + get_conversation),
     so we stub those: no DB, no SQL.
     """
 
-    def _due(self, streams, turns_map, now=1_000_000.0, skip=None, boot_time=0.0,
+    def _due(self, sessions, turns_map, now=1_000_000.0, skip=None, boot_time=0.0,
              last_role='assistant', eval_since=None, flush=False):
         """Brain.scribe_due bound to a fake brain whose higher session
-        functions are stubbed (present_streams + turns_since_last_encode +
+        functions are stubbed (present_sessions + turns_since_last_encode +
         get_conversation — the latter two are BrainTracesMixin methods, so
         the fake provides them directly). boot_time defaults ancient (past
         the boot-grace); pass ~now to test it. last_role is the newest
@@ -315,8 +329,8 @@ class TestScribeReactor(unittest.TestCase):
             # (keyless onboarding); the keyless path has its own test below.
             llm_available = True
 
-            def present_streams(self, window_min, limit):
-                return streams
+            def present_sessions(self, window_min, limit):
+                return sessions
 
             def turns_since_last_encode(self, sid):
                 return turns_map.get(sid, 0)
@@ -524,26 +538,27 @@ class TestScribeReactor(unittest.TestCase):
 
     def test_idle_tail_fires(self):
         # A session that went quiet below threshold still gets its tail encoded
-        # after SCRIBE_TAIL_IDLE_SECONDS — if it has > SCRIBE_TAIL_MIN_TURNS.
+        # after SCRIBE_TAIL_IDLE_SECONDS — if it has at least
+        # SCRIBE_TAIL_MIN_TURNS (two pending turns encode).
         from servers.scales.s1.encode_contract import (
             SCRIBE_TAIL_IDLE_SECONDS, SCRIBE_TAIL_MIN_TURNS)
         now = 1_000_000.0
         due = self._due(
             [{'session_id': 'tail',
               'live_recency': self._iso(now, SCRIBE_TAIL_IDLE_SECONDS + 60)}],
-            {'tail': SCRIBE_TAIL_MIN_TURNS + 1}, now=now)
+            {'tail': SCRIBE_TAIL_MIN_TURNS}, now=now)
         self.assertEqual(due['session_id'], 'tail')
 
     def test_idle_tail_guard_below_min_turns(self):
-        # The tail skips trivial leftovers (<= SCRIBE_TAIL_MIN_TURNS) — not worth
-        # a Sonnet call.
+        # The tail skips a lone leftover turn (below SCRIBE_TAIL_MIN_TURNS) —
+        # not worth a Sonnet call.
         from servers.scales.s1.encode_contract import (
             SCRIBE_TAIL_IDLE_SECONDS, SCRIBE_TAIL_MIN_TURNS)
         now = 1_000_000.0
         due = self._due(
             [{'session_id': 'trivial',
               'live_recency': self._iso(now, SCRIBE_TAIL_IDLE_SECONDS + 60)}],
-            {'trivial': SCRIBE_TAIL_MIN_TURNS}, now=now)
+            {'trivial': SCRIBE_TAIL_MIN_TURNS - 1}, now=now)
         self.assertIsNone(due)
 
     def test_idle_tail_not_yet_idle_enough(self):
@@ -552,7 +567,7 @@ class TestScribeReactor(unittest.TestCase):
         now = 1_000_000.0
         due = self._due(
             [{'session_id': 'recent', 'live_recency': self._iso(now, 120)}],
-            {'recent': SCRIBE_TAIL_MIN_TURNS + 1}, now=now)
+            {'recent': SCRIBE_TAIL_MIN_TURNS}, now=now)
         self.assertIsNone(due)
 
     def test_5plus_not_swept_when_session_gone_quiet(self):
@@ -605,7 +620,7 @@ class TestScribeReactor(unittest.TestCase):
         due = self._due(
             [{'session_id': 'dangling',
               'live_recency': self._iso(now, SCRIBE_TAIL_IDLE_SECONDS + 60)}],
-            {'dangling': SCRIBE_TAIL_MIN_TURNS + 1}, now=now, last_role='user')
+            {'dangling': SCRIBE_TAIL_MIN_TURNS}, now=now, last_role='user')
         self.assertEqual(due['session_id'], 'dangling')
 
     def test_boot_grace_suppresses_the_poll(self):
@@ -676,30 +691,30 @@ class TestScribeReactor(unittest.TestCase):
         period."""
         from servers.scales.s1.encode_contract import SCRIBE_TAIL_IDLE_SECONDS
         mark = now - 3 * SCRIBE_TAIL_IDLE_SECONDS
-        streams = [
+        sessions = [
             {'session_id': 'inherited',
              'live_recency': self._iso(now, 4 * SCRIBE_TAIL_IDLE_SECONDS)},
             {'session_id': 'eval',
              'live_recency': self._iso(now, 2 * SCRIBE_TAIL_IDLE_SECONDS)}]
-        return mark, streams
+        return mark, sessions
 
     def test_eval_brain_idle_tail_waits_for_a_flush(self):
         from servers.scales.s1.encode_contract import SCRIBE_TAIL_MIN_TURNS
         now = 1_000_000.0
-        mark, streams = self._eval_brain(now)
-        turns = {'eval': SCRIBE_TAIL_MIN_TURNS + 1}
-        self.assertIsNone(self._due(streams, turns, now=now, eval_since=mark),
+        mark, sessions = self._eval_brain(now)
+        turns = {'eval': SCRIBE_TAIL_MIN_TURNS}
+        self.assertIsNone(self._due(sessions, turns, now=now, eval_since=mark),
                           'time alone must not start an encode on an eval brain')
-        due = self._due(streams, turns, now=now, eval_since=mark, flush=True)
+        due = self._due(sessions, turns, now=now, eval_since=mark, flush=True)
         self.assertEqual(due['session_id'], 'eval')
 
     def test_eval_brain_never_encodes_a_session_from_before_the_mark(self):
         from servers.scales.s1.encode_contract import ENCODE_EVERY
         now = 1_000_000.0
-        mark, streams = self._eval_brain(now)
+        mark, sessions = self._eval_brain(now)
         turns = {'inherited': ENCODE_EVERY + 3}
         self.assertIsNone(
-            self._due(streams, turns, now=now, eval_since=mark, flush=True),
+            self._due(sessions, turns, now=now, eval_since=mark, flush=True),
             'a flush must not pay for the operator\'s leftover tail')
         # Mid-flow when the copy was made: the five-turn clause's case.
         recent = [{'session_id': 'inherited',
@@ -720,8 +735,8 @@ class TestScribeReactor(unittest.TestCase):
     def test_eval_brain_keeps_the_five_turn_rhythm_on_its_own_conversation(self):
         from servers.scales.s1.encode_contract import ENCODE_EVERY
         now = 1_000_000.0
-        streams = [{'session_id': 'eval', 'live_recency': self._iso(now, 10)}]
-        due = self._due(streams, {'eval': ENCODE_EVERY}, now=now,
+        sessions = [{'session_id': 'eval', 'live_recency': self._iso(now, 10)}]
+        due = self._due(sessions, {'eval': ENCODE_EVERY}, now=now,
                         eval_since=now - 600)
         self.assertEqual(due['session_id'], 'eval')
 
@@ -732,10 +747,10 @@ class TestScribeReactor(unittest.TestCase):
         import time
         from servers.scales.s1.encode_contract import (
             ENCODE_EVERY, SCRIBE_TAIL_MIN_TURNS)
-        mark, streams = self._eval_brain(time.time())
-        turns = {'inherited': ENCODE_EVERY + 3, 'eval': SCRIBE_TAIL_MIN_TURNS + 1}
+        mark, sessions = self._eval_brain(time.time())
+        turns = {'inherited': ENCODE_EVERY + 3, 'eval': SCRIBE_TAIL_MIN_TURNS}
         cap = self._poll(lambda now=None, skip_sessions=None, flush=False: self._due(
-            streams, turns, now=now, skip=skip_sessions, eval_since=mark,
+            sessions, turns, now=now, skip=skip_sessions, eval_since=mark,
             flush=flush))
         self.assertEqual(cap['spawned'], [])
 
@@ -743,10 +758,10 @@ class TestScribeReactor(unittest.TestCase):
         import time
         from servers.scales.s1.encode_contract import (
             ENCODE_EVERY, SCRIBE_TAIL_IDLE_SECONDS, SCRIBE_TAIL_MIN_TURNS)
-        mark, streams = self._eval_brain(time.time())
-        turns = {'inherited': ENCODE_EVERY + 3, 'eval': SCRIBE_TAIL_MIN_TURNS + 1}
+        mark, sessions = self._eval_brain(time.time())
+        turns = {'inherited': ENCODE_EVERY + 3, 'eval': SCRIBE_TAIL_MIN_TURNS}
         cap = self._poll(lambda now=None, skip_sessions=None, flush=False: self._due(
-            streams, turns, now=now, skip=skip_sessions, eval_since=mark,
+            sessions, turns, now=now, skip=skip_sessions, eval_since=mark,
             flush=flush), fast_forward=SCRIBE_TAIL_IDLE_SECONDS + 1)
         self.assertEqual([u.session_id for u in cap['spawned']], ['eval'])
 
@@ -949,7 +964,7 @@ class TestWorktreeHooks(BrainTestBase):
 
     def test_worktree_create_without_session_id_is_safe(self):
         # No session_id → must NOT touch any session: never fall back to the
-        # singleton (which would mis-attribute the worktree to another stream) and
+        # singleton (which would mis-attribute the worktree to another session) and
         # never create a phantom row. Asserts the invariant, not just output==''.
         from unittest.mock import patch
         with patch.object(self.brain, 'get_or_create_session',
@@ -1051,13 +1066,13 @@ class TestSeenCandidateDedup(BrainTestBase):
         a user_message s0 trace carrying recall_chain + the matching
         surface_selected K trace (the shapes get_session_turns joins on)."""
         import json as _json
-        chain = 's1r-%s-77' % sid[:8]
+        chain = 's1r-%s-77' % session_short(sid)
         tconn = self.brain._trace_dal.conn
         tconn.execute(
             "INSERT INTO trace_events (id, chain_id, scale, event_type, ref_type, "
             "metadata, summary, session_id, created_at) "
             "VALUES ('te5t5een', ?, 's0', 'K', 'user_message', ?, 'prior turn', ?, ?)",
-            ('s0-%s-77' % sid[:8],
+            ('s0-%s-77' % session_short(sid),
              _json.dumps({'content': 'earlier question', 'recall_chain': chain}),
              sid, '2026-01-01T00:00:00+00:00'))
         tconn.execute(
@@ -1139,6 +1154,216 @@ class TestSeenCandidateDedup(BrainTestBase):
 
 
 
+class TestToolMoment(BrainTestBase):
+    """hook_pre_edit — memories at an agent's first edit of a file: one
+    recall per cue per agent, at most TOOL_MOMENT_MAX_NODES, never a node the
+    agent was already shown. Its shows are its own record, not Haiku's picks:
+    the prompt surface's shown window never holds them."""
+    needs_embedder = False
+
+    PATH = 'servers/auth.py'
+
+    def _edit(self, sid, path=PATH, agent_id=''):
+        from servers.daemon_hooks import hook_pre_edit
+        return hook_pre_edit(self.brain, {'path': path, 'session_id': sid,
+                                          'agent_id': agent_id}, [])
+
+    def _nodes(self, n, tag='auth'):
+        return [self.brain.remember(
+            type='lesson', title='Tool moment %s node %d' % (tag, i),
+            content='About %s, note %d. ' % (tag, i) * 30) for i in range(n)]
+
+    def _recall_returning(self, nodes):
+        from unittest.mock import patch
+        fake = {'results': [{'id': n['id']} for n in nodes],
+                '_retrieval_stats': {}}
+        return patch.object(self.brain, 'recall', return_value=fake)
+
+    def _context(self, out):
+        return out['json'].get('additionalContext', '')
+
+    def _wire_user_turn(self, sid, chain, shown=()):
+        """A user turn whose recall chain is `chain`, plus (when `shown`) the
+        prompt surface's surface_selected row on it."""
+        self.brain._trace_dal.append(
+            chain_id='s0-%s-0' % session_short(sid), scale='s0', event_type='K',
+            ref_type='user_message', summary='edit the auth module',
+            metadata={'content': 'edit the auth module', 'recall_chain': chain},
+            session_id=sid)
+        if shown:
+            self.brain._trace_dal.append(
+                chain_id=chain, scale='s1', event_type='K',
+                ref_type='surface_selected',
+                ref_id=json.dumps([n['id'][:8] for n in shown]),
+                metadata={'selected': ['%s|%s' % (n['id'][:8], 'shown')
+                                       for n in shown]},
+                session_id=sid)
+
+    def _surfaced(self, sid):
+        turns = self.brain.get_conversation(sid, with_surfaced=True,
+                                            with_judge_output=False)
+        return {s['id'] for t in turns for s in (t.get('surfaced') or [])}
+
+    def test_first_edit_shows_capped_memories(self):
+        from servers.scales.s1.surface_contract import TOOL_MOMENT_MAX_NODES
+        nodes = self._nodes(TOOL_MOMENT_MAX_NODES + 2)
+        with self._recall_returning(nodes) as recall:
+            text = self._context(self._edit('tm-first'))
+        self.assertEqual(recall.call_args.kwargs['query'],
+                         'editing %s' % self.PATH)
+        self.assertTrue(text.startswith('Memories about %s:' % self.PATH))
+        shown = [n for n in nodes if n['id'][:8] in text]
+        self.assertEqual(len(shown), TOOL_MOMENT_MAX_NODES)
+        # A bare cut: no count, no get_nodes pointer, no fields beyond the
+        # header, content and corrections.
+        self.assertIn('…', text)
+        self.assertNotIn('get_nodes', text)
+        self.assertNotIn('Edges', text)
+
+    def test_second_edit_of_a_file_does_not_recall_again(self):
+        nodes = self._nodes(2)
+        with self._recall_returning(nodes) as recall:
+            self.assertTrue(self._context(self._edit('tm-twice')))
+            self.assertEqual(self._edit('tm-twice'), {'json': {}})
+        self.assertEqual(recall.call_count, 1)
+
+    def test_an_empty_recall_is_remembered_too(self):
+        with self._recall_returning([]) as recall:
+            self.assertEqual(self._edit('tm-empty'), {'json': {}})
+            self.assertEqual(self._edit('tm-empty'), {'json': {}})
+        self.assertEqual(recall.call_count, 1)
+
+    def test_a_node_the_agent_was_shown_is_not_shown_again(self):
+        sid = 'tm-seen'
+        nodes = self._nodes(3)
+        ctx = self.brain.get_or_create_session(sid)
+        self._wire_user_turn(sid, ctx.s1r_chain(), shown=nodes[:1])
+        with self._recall_returning(nodes):
+            text = self._context(self._edit(sid))
+        self.assertNotIn(nodes[0]['id'][:8], text)
+        self.assertIn(nodes[1]['id'][:8], text)
+
+    def test_a_redirect_to_a_shown_node_is_not_shown_again(self):
+        # Recall returns an absorbed id; the canonical pull hands back its
+        # survivor, which the agent already saw.
+        from unittest.mock import patch
+        sid = 'tm-redirect'
+        absorbed, survivor = self._nodes(2)
+        ctx = self.brain.get_or_create_session(sid)
+        self._wire_user_turn(sid, ctx.s1r_chain(), shown=[survivor])
+        survivor_node = self.brain.get_node(survivor['id'])
+        with self._recall_returning([absorbed]), \
+                patch.object(self.brain, 'get_node',
+                             return_value={absorbed['id']: survivor_node}):
+            out = self._edit(sid)
+        self.assertEqual(out, {'json': {}})
+
+    def test_the_moment_shows_stay_out_of_the_surface_window(self):
+        # Haiku may still pick what the tool moment showed: its shows are not
+        # in the per-turn shown set the prompt surface reads.
+        sid = 'tm-own-record'
+        nodes = self._nodes(2)
+        ctx = self.brain.get_or_create_session(sid)
+        self._wire_user_turn(sid, ctx.s1r_chain())
+        with self._recall_returning(nodes):
+            self.assertTrue(self._context(self._edit(sid)))
+        self.assertEqual(self._surfaced(sid), set())
+
+    def test_a_node_shown_for_one_file_is_not_shown_for_the_next(self):
+        nodes = self._nodes(3)
+        with self._recall_returning(nodes[:2]):
+            self._edit('tm-next')
+        with self._recall_returning(nodes):
+            text = self._context(self._edit('tm-next', path='servers/b.py'))
+        self.assertNotIn(nodes[0]['id'][:8], text)
+        self.assertIn(nodes[2]['id'][:8], text)
+
+    def test_an_agents_own_working_files_and_data_recall_nothing(self):
+        # Shapes from production cues: a path TOOL_MOMENT_SKIP matches never
+        # reaches recall and leaves no row, so its first edit stays silent.
+        skipped = (
+            '/private/tmp/claude-503/-Users-u-repo/0f1e/scratchpad/probe.py',
+            '/tmp/entity-audit-x/audit.py',
+            '/var/folders/p8/v9/T/tmp.Ey5/drive.py',
+            '/Users/u/.claude/projects/-Users-u-repo/memory/MEMORY.md',
+            '/Users/u/.claude-second/projects/-Users-u-repo/memory/rule.md',
+            '/Users/u/.claude/plans/radiant-otter.md',
+            '/Users/u/.claude-second/side-session-notes/local_1/report.md',
+            '/Users/u/Library/Application Support/Claude/side-session-notes/'
+            'local_1/reader-a.md',
+            'web/node_modules/left-pad/index.js',
+            '.venv/lib/python3.11/site-packages/x/y.py',
+            'uv.lock', 'servers/app.log', 'dist/app.js.map',
+            'config/settings.json',
+        )
+        nodes = self._nodes(1)
+        with self._recall_returning(nodes) as recall:
+            for i, path in enumerate(skipped):
+                with self.subTest(path=path):
+                    self.assertEqual(self._edit('tm-skip-%d' % i, path=path),
+                                     {'json': {}})
+                    self.assertEqual(
+                        self.brain.tool_moment_rows('tm-skip-%d' % i), [])
+        self.assertEqual(recall.call_count, 0)
+
+    def test_work_files_outside_the_working_directory_still_recall(self):
+        recalled = (
+            'package.json', 'tmp/fixture.py', '/Users/u/.claude/CLAUDE.md',
+            '/Users/u/.claude/skills/brief/SKILL.md',
+            '/Users/u/.claude/projects/-Users-u-repo/research/sim/replay.py',
+            '/Users/u/repo/.claude/worktrees/w1/servers/a.py',
+            '/Users/u/work/.worktrees/km1/api/lib/a.ts',
+        )
+        nodes = self._nodes(1)
+        for i, path in enumerate(recalled):
+            with self.subTest(path=path), \
+                    self._recall_returning(nodes) as recall:
+                self.assertTrue(self._context(
+                    self._edit('tm-work-%d' % i, path=path)))
+                self.assertEqual(recall.call_count, 1)
+
+    def test_a_subagent_has_its_own_cues_and_shown_set(self):
+        sid = 'tm-agent'
+        ctx = self.brain.get_or_create_session(sid)
+        self._wire_user_turn(sid, ctx.s1r_chain())
+        main_nodes = self._nodes(2, tag='main')
+        with self._recall_returning(main_nodes):
+            self._edit(sid)
+        # The subagent's first edit of the same file recalls for it: it never
+        # saw what the session's agent was shown.
+        with self._recall_returning(main_nodes) as recall:
+            text = self._context(self._edit(sid, agent_id='agent-1'))
+        self.assertEqual(recall.call_count, 1)
+        self.assertIn(main_nodes[0]['id'][:8], text)
+        # Its own shows dedup its next file.
+        with self._recall_returning(main_nodes + self._nodes(1, tag='b')):
+            text = self._context(self._edit(sid, path='servers/b.py',
+                                            agent_id='agent-1'))
+        self.assertNotIn(main_nodes[0]['id'][:8], text)
+
+
+class TestToolMomentRecall(BrainTestBase):
+    """The real wire: recall on the file cue finds a memory about the file,
+    and the render carries its correction."""
+
+    def test_a_memory_about_the_file_arrives_with_its_correction(self):
+        from servers.daemon_hooks import hook_pre_edit
+        claim = self.brain.remember(
+            type='mechanism', title='servers/vault.py hashes secrets with md5',
+            content='editing servers/vault.py: the vault hashes every secret '
+                    'with md5 before it is stored.')['id']
+        fix = self.brain.remember(
+            type='correction', title='servers/vault.py moved to argon2',
+            content='The md5 hashing in servers/vault.py was replaced.')['id']
+        self.brain.connect_typed(fix, claim, relation='corrects',
+                                 description='the hash changed after a review')
+        out = hook_pre_edit(self.brain, {'path': 'servers/vault.py',
+                                         'session_id': 'tm-real'}, [])
+        text = out['json'].get('additionalContext', '')
+        self.assertIn(claim[:8], text)
+        self.assertIn('servers/vault.py moved to argon2', text)
+
+
 class TestStopHookMintsNoEdges(BrainTestBase):
     """co_accessed retirement guard: the Stop hook's post-response path must
     not create edge_relations rows. This is the writer the retirement
@@ -1171,14 +1396,14 @@ class TestStopHookMintsNoEdges(BrainTestBase):
 
 
 class TestSessionlessHookPayload(BrainTestBase):
-    """A hook payload that names no session names no stream. Both per-turn
+    """A hook payload that names no session names no session to record under. Both per-turn
     hooks raise (the daemon logs it and the hook scripts fail open) instead of
-    recording the turn under another stream's session."""
+    recording the turn under another session."""
     needs_embedder = False
 
     def test_recall_and_stop_hooks_raise_without_session(self):
         from servers.daemon_hooks import hook_post_response_track
-        self.brain.reset_session_activity('another-stream')
+        self.brain.reset_session_activity('another-session')
         with self.assertRaises(ValueError):
             hook_recall(self.brain, {'prompt': 'sessionless prompt'}, [])
         with self.assertRaises(ValueError):
@@ -1209,6 +1434,399 @@ class TestDispatchFailureReachesTheErrorsTable(BrainTestBase):
         self.assertEqual(match[0]['type'], 'RuntimeError')
         self.assertEqual(match[0]['error'], 'handler exploded')
         self.assertIn('cmd=get_node', match[0]['context'])
+
+
+class TestBusyWriteLockIsMarkedNotRun(unittest.TestCase):
+    """A write that cannot take the write lock is declined before it runs, and
+    the reply says so (NOT_RUN_FIELD) — the MCP proxy resends only replies
+    that carry it, so a reply where the command ran must never carry it."""
+
+    def _daemon(self, lock_free):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from servers.daemon_server import BrainDaemon
+        d = BrainDaemon('/tmp/unused-busy-lock.db')  # no start() → no sockets
+        d._log = lambda *a: None
+        d.brain = SimpleNamespace(write_lock=Mock(acquire=Mock(return_value=lock_free)))
+        return d
+
+    def test_a_busy_lock_declines_the_write_and_marks_it_not_run(self):
+        from servers.contract import NOT_RUN_FIELD
+        d = self._daemon(lock_free=False)
+        ran = []
+        res = d._locked_exec(lambda: ran.append(1), 'remember', {})
+        self.assertEqual(ran, [])
+        self.assertFalse(res['ok'])
+        self.assertIs(res[NOT_RUN_FIELD], True)
+
+    def test_a_write_that_ran_carries_no_mark(self):
+        from servers.contract import NOT_RUN_FIELD
+        d = self._daemon(lock_free=True)
+        res = d._locked_exec(lambda: {'ok': False, 'error': 'refused'}, 'remember', {})
+        self.assertNotIn(NOT_RUN_FIELD, res)
+
+
+class TestHookRecallWritesThePromptReadersPieces(BrainTestBase):
+    """The write door for a prompt the hook read (host_contract.read_prompt):
+    one S0 row per piece under its speaker's ref_type, the operator's text
+    first, recall on the reader's recall text — and a client that predates
+    the reader still records the whole prompt as one operator row."""
+
+    STAMP = {"vocab_version": 1, "impl_identity": "abc123abc123"}
+
+    def _rows(self, sid):
+        return [(r[0], r[1], json.loads(r[2] or '{}'), r[3]) for r in self.brain.logs_conn.execute(
+            "SELECT ref_type, ref_id, metadata, summary FROM trace_events "
+            "WHERE scale='s0' AND session_id=? AND event_type='K' ORDER BY rowid", (sid,))]
+
+    def test_a_glued_reminder_becomes_its_own_row_after_the_operator_text(self):
+        sid = 'pieces-reminder-0001'
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}) as recall:
+            hook_recall(self.brain, {
+                "prompt": "<system-reminder>\nworktree notice\n</system-reminder>\nthe test fails",
+                "session_id": sid, "register_only": False,
+                "pieces": [["operator", "the test fails", ""],
+                           ["harness", "worktree notice", "<system-reminder>"]],
+                "recall_text": "the test fails", **self.STAMP}, [])
+        rows = self._rows(sid)
+        self.assertEqual([(r[0], r[1]) for r in rows],
+                         [('user_message', ''), ('env_message', '<system-reminder>')])
+        self.assertEqual(rows[0][3], 'the test fails')       # the operator's row holds only their text
+        self.assertIn('recall_chain', rows[0][2])             # the turn's row carries the recall chain
+        self.assertNotIn('recall_chain', rows[1][2])
+        for _, _, meta, _ in rows:
+            self.assertEqual((meta['vocab_version'], meta['impl_identity']), (1, 'abc123abc123'))
+        self.assertEqual(recall.call_args.kwargs['query'], 'the test fails')
+
+    def test_a_subagent_report_recalls_on_the_report_and_is_not_the_operator(self):
+        sid = 'pieces-handback-0001'
+        from servers.channels.thalamus import thalamus
+        thalamus.file(self.brain, 'test', 'a due notice for every session', for_whom='all')
+        whole = '<agent-message from="x">\n[Subagent hand-back] notice\n  the report body'
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}) as recall:
+            hook_recall(self.brain, {
+                "prompt": whole, "session_id": sid, "register_only": False,
+                "pieces": [["subagent", "the report body", "<agent-message"]],
+                "recall_text": "the report body", **self.STAMP}, [])
+        rows = self._rows(sid)
+        self.assertEqual([(r[0], r[3]) for r in rows], [('subagent_message', 'the report body')])
+        self.assertEqual(recall.call_args.kwargs['query'], 'the report body')
+        # The first-prompt moment waits for the operator: a report is not them arriving.
+        self.assertFalse(self.brain.get_or_create_session(sid).prompt_delivered)
+
+    def test_two_reports_in_one_prompt_are_two_rows_in_one_turn(self):
+        sid = 'pieces-handback-0002'
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}) as recall:
+            hook_recall(self.brain, {
+                "prompt": "two hand-backs", "session_id": sid, "register_only": False,
+                "pieces": [["subagent", "first report", "<agent-message"],
+                           ["subagent", "second report", "<agent-message"]],
+                "recall_text": "first report\n\nsecond report", **self.STAMP}, [])
+        rows = self._rows(sid)
+        self.assertEqual([(r[0], r[3]) for r in rows],
+                         [('subagent_message', 'first report'), ('subagent_message', 'second report')])
+        self.assertIn('recall_chain', rows[0][2])
+        self.assertNotIn('recall_chain', rows[1][2])
+        chains = {r[0] for r in self.brain.logs_conn.execute(
+            "SELECT chain_id FROM trace_events WHERE scale='s0' AND session_id=? "
+            "AND event_type='K'", (sid,))}
+        self.assertEqual(len(chains), 1)      # the second rides in the first's turn
+        self.assertEqual(recall.call_args.kwargs['query'], 'first report\n\nsecond report')
+
+    def test_an_unreadable_hand_back_warns_on_its_own_session(self):
+        sid = 'pieces-handback-0003'
+        raw = '<agent-message from="x">\n[Subagent hand-back] notice\n</agent-message>'
+        with patch('servers.daemon_hooks._run_surface'), patch.object(self.brain, 'recall'):
+            hook_recall(self.brain, {
+                "prompt": raw, "session_id": sid, "register_only": True,
+                "pieces": [["subagent", raw, "<agent-message"]], "recall_text": "", **self.STAMP}, [])
+        sessions = [r[0] for r in self.brain.logs_conn.execute(
+            "SELECT session_id FROM debug_log WHERE source='hook_recall_extract'")]
+        self.assertEqual(sessions, [sid])
+
+    def test_a_harness_notice_registers_without_recall_and_keeps_the_reply(self):
+        sid = 'pieces-notice-0001'
+        notice = '<task-notification>\n<summary>done</summary>\n</task-notification>'
+        with patch('servers.daemon_hooks._run_surface') as surface, \
+                patch.object(self.brain, 'recall') as recall:
+            hook_recall(self.brain, {
+                "prompt": notice, "session_id": sid, "register_only": True,
+                "pieces": [["harness", notice, "<task-notification>"]],
+                "recall_text": "", **self.STAMP}, [])
+        recall.assert_not_called(); surface.assert_not_called()
+        rows = self._rows(sid)
+        self.assertEqual([r[0] for r in rows], ['env_message'])
+        self.assertIs(rows[0][2][REGISTER_ONLY_FIELD], True)
+        post_response_common(self.brain, sid, "the background run finished green")
+        refs = [r[0] for r in self.brain.logs_conn.execute(
+            "SELECT ref_type FROM trace_events WHERE scale='s0' AND session_id=?", (sid,))]
+        self.assertIn('assistant_message', refs)    # my reply is conversation, not a heartbeat
+        self.assertNotIn('user_message', refs)      # and nothing was recorded as the operator's
+
+    def _warned(self, source):
+        return [r[0] for r in self.brain.logs_conn.execute(
+            "SELECT session_id FROM debug_log WHERE source=?", (source,))]
+
+    def test_an_undeclared_wrapper_is_recorded_and_logged_on_its_session(self):
+        sid = 'pieces-unknown-0001'
+        wrapper = '<new-wake-event>\nSomething happened.\n</new-wake-event>'
+        with patch('servers.daemon_hooks._run_surface'), patch.object(self.brain, 'recall') as recall:
+            hook_recall(self.brain, {
+                "prompt": wrapper, "session_id": sid, "register_only": True,
+                "pieces": [["harness", wrapper, "<new-wake-event>"]],
+                "recall_text": "", **self.STAMP}, [])
+        recall.assert_not_called()
+        self.assertEqual([(r[0], r[1]) for r in self._rows(sid)],
+                         [('env_message', '<new-wake-event>')])
+        self.assertEqual(self._warned('unknown_envelope'), [sid])
+
+    def test_a_declared_wrapper_and_untagged_text_are_not_logged(self):
+        sid = 'pieces-unknown-0002'
+        with patch('servers.daemon_hooks._run_surface'), patch.object(self.brain, 'recall'):
+            hook_recall(self.brain, {
+                "prompt": "x", "session_id": sid, "register_only": True,
+                "pieces": [["harness", "<side-sessions-event>x</side-sessions-event>",
+                            "<side-sessions-event>"], ["harness", "unattended text", ""]],
+                "recall_text": "", **self.STAMP}, [])
+        self.assertEqual(self._warned('unknown_envelope'), [])
+
+    def test_tags_are_checked_against_the_table_this_prompt_was_read_with(self):
+        # The session last resolved as codex; this prompt's tells resolve no
+        # host, so the hook read every host's table — and so must the check.
+        sid = 'pieces-unknown-0003'
+        self.brain.get_or_create_session(sid).set_env(host='codex')
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}):
+            hook_recall(self.brain, {
+                "prompt": "a report", "session_id": sid, "register_only": False, "tells": [],
+                "pieces": [["subagent", "the report", "<agent-message"]],
+                "recall_text": "the report", **self.STAMP}, [])
+        self.assertEqual(self._warned('unknown_envelope'), [])
+
+    def test_a_brief_from_another_session_is_recalled_task_first_and_is_not_the_operator(self):
+        sid = 'pieces-brief-0001'
+        from servers import host_contract as hc
+        header = hc._BRIEF_WITH_BACKGROUND
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}) as recall:
+            hook_recall(self.brain, {
+                "prompt": "a brief", "session_id": sid, "register_only": False,
+                "pieces": [["harness", "Bring options.", header],
+                           ["harness", "Two causes were found.", header],
+                           ["harness", "worktree notice", "<system-reminder>"]],
+                "recall_text": "Bring options.\n\nTwo causes were found.", **self.STAMP}, [])
+        self.assertEqual([(r[0], r[3]) for r in self._rows(sid)],
+                         [('env_message', 'Bring options.'),
+                          ('env_message', 'Two causes were found.'),
+                          ('env_message', 'worktree notice')])
+        self.assertEqual(recall.call_args.kwargs['query'], 'Bring options.\n\nTwo causes were found.')
+        self.assertFalse(self.brain.get_or_create_session(sid).prompt_delivered)
+        self.assertEqual(self._warned('unknown_envelope') + self._warned('hook_recall_extract'), [])
+
+    def test_an_empty_brief_is_an_error_like_an_unreadable_hand_back(self):
+        sid = 'pieces-brief-0002'
+        from servers import host_contract as hc
+        header = hc._BRIEF_WITH_BACKGROUND
+        with patch('servers.daemon_hooks._run_surface'), patch.object(self.brain, 'recall'):
+            hook_recall(self.brain, {
+                "prompt": header, "session_id": sid, "register_only": True,
+                "pieces": [["harness", header, header]], "recall_text": "", **self.STAMP}, [])
+        self.assertEqual(self._warned('hook_recall_extract'), [sid])
+        levels = {r[0] for r in self.brain.logs_conn.execute(
+            "SELECT event_type FROM debug_log WHERE source='hook_recall_extract'")}
+        self.assertEqual(levels, {'error'})       # surfaced at boot, not just listed
+
+    def test_pieces_the_door_cannot_place_record_the_prompt_as_before_loudly(self):
+        sid = 'pieces-bad-0001'
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}), \
+                patch.object(self.brain, '_log_error') as logged:
+            hook_recall(self.brain, {
+                "prompt": "hello there", "session_id": sid,
+                "pieces": [["stranger", "hello there", ""]], "recall_text": "hello there"}, [])
+        self.assertEqual([(r[0], r[3]) for r in self._rows(sid)], [('user_message', 'hello there')])
+        self.assertIn('hook_recall_pieces', [c.args[0] for c in logged.call_args_list])
+
+    def _report(self, sid, n):
+        whole = '<agent-message from="x">\n[Subagent hand-back] notice\n  report %d' % n
+        hook_recall(self.brain, {
+            "prompt": whole, "session_id": sid,
+            "pieces": [["subagent", "report %d" % n, "<agent-message"]],
+            "recall_text": "report %d" % n, **self.STAMP}, [])
+        post_response_common(self.brain, sid, "read report %d" % n)
+
+    def test_subagent_reports_bring_an_encode_due_and_harness_notices_do_not(self):
+        sid = 'pieces-cadence-0001'
+        notice = '<task-notification>\n<summary>done</summary>'
+        with patch('servers.daemon_hooks._run_surface', return_value=None), \
+                patch.object(self.brain, 'recall', return_value={'results': []}):
+            for n in range(3):
+                self._report(sid, n)
+            hook_recall(self.brain, {
+                "prompt": notice, "session_id": sid, "register_only": True,
+                "pieces": [["harness", notice, "<task-notification>"]], "recall_text": ""}, [])
+            post_response_common(self.brain, sid, "noted")
+        self.assertEqual(self.brain.turns_since_last_encode(sid), 3)
+
+    def test_haikus_window_keeps_operator_turns_after_a_run_of_reports(self):
+        sid = 'pieces-window-0002'
+        with patch('servers.daemon_hooks._run_surface', return_value=None), \
+                patch.object(self.brain, 'recall', return_value={'results': []}):
+            hook_recall(self.brain, {"prompt": "the operator's earlier question", "session_id": sid}, [])
+            post_response_common(self.brain, sid, "earlier answer")
+            for n in range(6):
+                self._report(sid, n)
+        self.brain.remember(type="rule", title="Test rule for recall", content="Important test content")
+        with patch('servers.daemon_hooks._run_surface', return_value=None) as surface:
+            hook_recall(self.brain, {"prompt": "Test rule for recall", "session_id": sid}, [])
+        from servers.trace_contract import row_text, turn_incoming
+        window = [row_text(r) for t in surface.call_args.kwargs['recent_turns']
+                  for r in turn_incoming(t)]
+        self.assertIn("the operator's earlier question", window)
+
+    def test_haikus_conversation_shows_a_report_under_its_speaker(self):
+        sid = 'pieces-window-0001'
+        self.brain.remember(type="rule", title="Test rule for recall", content="Important test content")
+        with patch('servers.daemon_hooks._run_surface', return_value=None), \
+                patch.object(self.brain, 'recall', return_value={'results': []}):
+            hook_recall(self.brain, {"prompt": "first question about recall", "session_id": sid}, [])
+            post_response_common(self.brain, sid, "first answer")
+            whole = '<agent-message from="x">\n[Subagent hand-back] notice\n  SUBAGENT REPORT TEXT'
+            hook_recall(self.brain, {
+                "prompt": whole, "session_id": sid,
+                "pieces": [["subagent", "SUBAGENT REPORT TEXT", "<agent-message"]],
+                "recall_text": "SUBAGENT REPORT TEXT", **self.STAMP}, [])
+            post_response_common(self.brain, sid, "read the report")
+        with patch('servers.daemon_hooks._run_surface', return_value=None) as surface:
+            hook_recall(self.brain, {"prompt": "Test rule for recall", "session_id": sid}, [])
+        from servers.scales.s1.surface_contract import build_surface_prompt
+        window = surface.call_args.kwargs['recent_turns']
+        self.assertEqual(len(window), 2)        # the operator's turn and the report's
+        prompt, _ = build_surface_prompt([], 'Test rule for recall', recent_turns=window)
+        conv = prompt[prompt.index('<conversation>\n'):prompt.index('</conversation>')]
+        self.assertIn('<user>first question about recall</user>', conv)
+        self.assertIn('<subagent>SUBAGENT REPORT TEXT</subagent>\n'
+                      '<assistant>read the report</assistant>', conv)
+
+
+class TestPromptShapesThroughTheEncoderTimeline(BrainTestBase):
+    """Every prompt shape the reader types, end to end through the real parts:
+    host_contract.read_prompt (as the prompt hook calls it) → hook_recall's
+    write door → my reply at Stop → the encoder's lived timeline, read back
+    through recall_episodes. Nothing downstream knows the new wrappers; each
+    row renders under its speaker's element because the reader typed it.
+    Shapes are shortened copies of real prompts (2026-10-16 census)."""
+    needs_embedder = False
+
+    WORKTREE = '<system-reminder>\nYou are operating in a git worktree.\n</system-reminder>\n\n'
+
+    def _prompt(self, sid, prompt, reply, unattended=False):
+        from servers import host_contract as hc
+        intake = hc.read_prompt(prompt, 'claude-code', unattended)
+        with patch('servers.daemon_hooks._run_surface'), \
+                patch.object(self.brain, 'recall', return_value={'results': []}):
+            hook_recall(self.brain, {
+                "prompt": prompt, "session_id": sid,
+                "register_only": not intake.recall_text,
+                "pieces": [list(p) for p in intake.pieces],
+                "recall_text": intake.recall_text, "tells": ["CLAUDE_CODE_SESSION_ID"],
+                "vocab_version": hc.VOCAB_VERSION, "impl_identity": hc.contract_fingerprint()}, [])
+        post_response_common(self.brain, sid, reply)
+
+    def _timeline(self, sid):
+        """[[(element, text), …] per turn] as the encoder renders its window."""
+        import html
+        import re
+        from servers.scales.s1.encode import _render_lived_sequence_timeline, _window
+        out = _render_lived_sequence_timeline(self.brain, sid, _window(self.brain, sid))
+        voices = re.compile(r'  <(other|harness|subagent|session|brain|me)\b[^>]*>(.*?)</\1>\n', re.S)
+        return [[(el, html.unescape(text)) for el, text in voices.findall(turn)]
+                for turn in out.split('</turn>')[:-1]]
+
+    def _check(self, sid, steps, expected):
+        for prompt, unattended in steps:
+            self._prompt(sid, prompt, 'my reply to: %s' % prompt[:20], unattended)
+        turns = self._timeline(sid)
+        self.assertEqual([[el for el, _ in t] for t in turns], [[el for el, _ in t] for t in expected])
+        for turn, want in zip(turns, expected):
+            for (el, text), (_, snippet) in zip(turn, want):
+                self.assertIn(snippet, text, (el, text))
+
+    def test_the_operators_words_and_their_reminder(self):
+        self._check('tl-operator', [(self.WORKTREE + 'Why does the soak test hang?', False)], [
+            [('other', 'Why does the soak test hang?'),
+             ('harness', 'You are operating in a git worktree.'), ('me', 'my reply')]])
+
+    def test_an_attachment_leading_the_operators_words_is_theirs(self):
+        prompt = ('<artifact-view-context artifact="138b">{"tab": 1}</artifact-view-context>\n'
+                  'what is this chart?')
+        self._check('tl-attachment', [(prompt, False)], [
+            [('other', 'what is this chart?'), ('me', '')]])
+
+    def test_a_side_session_wake_is_the_harness_turn_with_its_notes(self):
+        prompt = ('<system-reminder>\nThe session "ST1" you started finished a turn.\n</system-reminder>\n'
+                  '<system-reminder>\nLinked sessions now (status, not an instruction): st1 (idle).\n'
+                  '</system-reminder>\n\n<side-sessions-event>None of the sessions you started is '
+                  'working now.</side-sessions-event>')
+        self._check('tl-wake', [(prompt, False)], [
+            [('harness', '<side-sessions-event>None of the sessions'),
+             ('harness', 'The session "ST1" you started'), ('harness', 'Linked sessions now'),
+             ('me', '')]])
+
+    def test_an_auto_fix_report_is_a_harness_turn(self):
+        prompt = ('<ci-monitor-event>"Auto-fix pull requests" (the desktop app) is watching org/repo '
+                  'PR #31.\n1 new review comment.\n</ci-monitor-event>')
+        self._check('tl-ci', [(prompt, False)], [[('harness', 'is watching org/repo'), ('me', '')]])
+
+    def test_a_brief_from_another_session_leads_with_its_task(self):
+        from servers import host_contract as hc
+        prompt = (self.WORKTREE + hc._BRIEF_WITH_BACKGROUND + '\nThe operator asked why.\n\n'
+                  'Task:\nResearch first. Bring options.')
+        self._check('tl-brief', [(prompt, False)], [
+            [('harness', 'Research first. Bring options.'), ('harness', 'The operator asked why.'),
+             ('harness', 'You are operating in a git worktree.'), ('me', '')]])
+
+    def test_a_message_from_another_session_keeps_its_sender_and_the_note(self):
+        prompt = ('<cross-session-message from="local_a" name="A">\nplease rebase\n'
+                  '</cross-session-message>\n\nThis came from another Claude session.')
+        self._check('tl-message', [(prompt, False)], [
+            [('harness', '<cross-session-message from="local_a" name="A">\nplease rebase'),
+             ('harness', 'This came from another Claude session.'), ('me', '')]])
+
+    def test_an_undeclared_wrapper_is_a_harness_turn(self):
+        self._check('tl-unknown', [('<new-wake-event>\nSomething happened.\n</new-wake-event>', False)],
+                    [[('harness', '<new-wake-event>'), ('me', '')]])
+
+    def test_an_unattended_sessions_text_is_a_harness_turn(self):
+        self._check('tl-unattended', [('Review the campaign draft.', True)],
+                    [[('harness', 'Review the campaign draft.'), ('me', '')]])
+
+    def test_a_subagent_report_is_a_subagent_turn(self):
+        prompt = '<agent-message from="x">\n[Subagent hand-back] notice\n  the report body\n</agent-message>'
+        self._check('tl-subagent', [(prompt, False)], [[('subagent', 'the report body'), ('me', '')]])
+
+    def test_machine_turns_sit_between_the_operators_turns_without_borrowing_them(self):
+        wake = '<side-sessions-event>None of the sessions you started is working now.</side-sessions-event>'
+        self._check('tl-sequence', [('Start the two side sessions.', False), (wake, False),
+                                    ('What did they find?', False)], [
+            [('other', 'Start the two side sessions.'), ('me', '')],
+            [('harness', '<side-sessions-event>'), ('me', '')],
+            [('other', 'What did they find?'), ('me', '')]])
+
+    def test_only_the_operators_words_are_operator_dialogue(self):
+        from servers import host_contract as hc
+        sid = 'tl-dialogue'
+        for prompt in ('<ci-monitor-event>x</ci-monitor-event>',
+                       hc._BRIEF_TASK_ONLY + '\nFix the flaky test.',
+                       '<cross-session-message from="local_a" name="A">\nhi\n</cross-session-message>',
+                       'Is the fix in?'):
+            self._prompt(sid, prompt, 'ok')
+        said = [e['summary'] for e in self.brain.recall_episodes(session_id=sid)['episodes']
+                if e.get('ref_type') == 'user_message']
+        self.assertEqual(said, ['Is the fix in?'])
 
 
 if __name__ == '__main__':

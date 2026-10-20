@@ -290,12 +290,17 @@ class TestAnnotationFailuresReachTheErrorsTable(unittest.TestCase):
                        'cache_creation_tokens': 0, 'model': 'claude-test',
                        'truncations': [], 'undispatched_tool_calls': [],
                        'annotation_errors': self._FAILED}
-        messages = [{'role': 'user', 'content': 'hi', 'trace_id': 'aaaaaaaa',
-                     'judge_output': None},
-                    {'role': 'assistant', 'content': 'hello', 'trace_id': 'bbbbbbbb'}]
+        window = [{'user': {'id': 'aaaaaaaa', 'ref_type': 'user_message', 'chain_id': 's0-test-0',
+                          'created_at': '2026-10-19T00:00:00+00:00', 'metadata': {},
+                          'summary': 'hi', 'content': 'hi', 'judge_output': None},
+                 'with': [], 'actions': [],
+                 'assistant': {'id': 'bbbbbbbb', 'ref_type': 'assistant_message',
+                               'chain_id': 's0-test-0', 'metadata': {},
+                               'created_at': '2026-10-19T00:00:01+00:00',
+                               'summary': 'hello', 'content': 'hello'}}]
         with brain_env(needs_embedder=False) as env:
             brain = env.brain
-            with mock.patch.object(encode, '_gather_messages', return_value=messages), \
+            with mock.patch.object(encode, '_window', return_value=window), \
                     mock.patch('servers.scales.runner.make_client', return_value=object()), \
                     mock.patch.object(encode, 'run_llm_loop', return_value=loop_result), \
                     mock.patch.object(brain, '_log_error', wraps=brain._log_error) as spy:

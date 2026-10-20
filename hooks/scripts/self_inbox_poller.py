@@ -53,7 +53,7 @@ def main():
 
     # Startup banner → stderr (stdout is reserved for the message events the
     # Monitor tool turns into notifications). Surfaces WHICH inbox armed so an
-    # operator can confirm the right stream without the poller faking an event.
+    # operator can confirm the right session without the poller faking an event.
     sys.stderr.write("self_inbox_poller: watching inbox for %s "
                      "(poll %gs→%gs, x%g backoff)\n" % (sid, fast, slow, backoff))
     sys.stderr.flush()

@@ -177,8 +177,33 @@ def log_hook_error(source, error, context="", level="error"):
             pass  # Last resort — stderr was already printed
 
 
-def run_hook(name, fn, on_error=None):
+def _gate_allows(name):
+    """The brain gate (servers/brain_gate.py): False when the brain is paused
+    or this session's project is ignored — the hook then does nothing, so the
+    daemon never hears from the session. Fails OPEN on its own error (logged):
+    a broken gate must not silently kill every hook."""
+    try:
+        from servers.brain_gate import hook_allows
+        data = get_hook_input()
+        verdict = hook_allows(data.get("cwd", ""), data.get("session_id", ""))
+    except Exception as e:
+        log_hook_error(name, e, "gate check failed — hook runs ungated", level="warning")
+        return True
+    if verdict.run:
+        return True
+    brain_debug("%s: gated (%s)" % (name, verdict.reason))
+    return False
+
+
+def run_hook(name, fn, on_error=None, gated=True):
     """Single error boundary for a hook script — the standard every hook runs through.
+
+    Asks the brain gate first: a paused brain or an ignored project means fn()
+    never runs and the hook prints nothing. Two hooks pass `gated=False`:
+    boot_brain, whose shell already asked the gate (a closed gate never starts
+    it), and stamp_caller_session, which is not memory mechanics and must keep
+    working while paused (it attributes the explicit tool calls that stay
+    available, including the one that un-pauses).
 
     Runs fn() (the hook body). If it raises, logs ONCE to hook_errors (via
     log_hook_error, the canonical hook-side sink) and invokes on_error() for any
@@ -192,6 +217,8 @@ def run_hook(name, fn, on_error=None):
     hook owns its own output contract (approve/block/additionalContext/none),
     which is why output lives in fn()/on_error(), not here.
     """
+    if gated and not _gate_allows(name):
+        return
     try:
         fn()
     except Exception as e:
@@ -240,24 +267,42 @@ def mark_hook_errors_surfaced(error_ids):
         pass
 
 
+_hook_input_cache = None
+
+
 def get_hook_input():
-    """Parse HOOK_INPUT from environment (set by bash shim).
+    """The hook payload — HOOK_INPUT from the environment (set by the bash
+    shim), else stdin (a hook run as bare `python3`, e.g. post_tool_trace).
+    Read ONCE per process and cached: run_hook's gate and the hook body both
+    call this, and stdin can only be read once.
 
     Backfills `session_id` from CLAUDE_CODE_SESSION_ID (the env var Claude Code
     exports in every hook process) when the payload omits it. Some events —
     notably WorktreeCreate — don't carry session_id in their JSON, and the daemon
     is a separate launchd process that can't read the hook's env; without this the
     daemon would fall back to the last-writer-wins singleton and mis-attribute
-    per-session state to the wrong stream."""
+    per-session state to the wrong session."""
+    global _hook_input_cache
+    if _hook_input_cache is not None:
+        return _hook_input_cache
+    raw = os.environ.get("HOOK_INPUT")
+    if raw is None:
+        try:
+            raw = "" if sys.stdin.isatty() else sys.stdin.read()
+        except Exception:
+            raw = ""
     try:
-        data = json.loads(os.environ.get("HOOK_INPUT", "{}"))
+        data = json.loads(raw) if raw.strip() else {}
     except Exception as e:
-        log_hook_error(_get_hook_name(), e, "Failed to parse HOOK_INPUT", level="warning")
-        return {}
-    if isinstance(data, dict) and not data.get("session_id"):
+        log_hook_error(_get_hook_name(), e, "Failed to parse hook input", level="warning")
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if not data.get("session_id"):
         env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         if env_sid:
             data["session_id"] = env_sid
+    _hook_input_cache = data
     return data
 
 
@@ -279,6 +324,51 @@ def host_tells():
     return [name for name in HOST_TELL_ENV_VARS if os.environ.get(name)]
 
 
+# ── A hook machine with no route to the daemon ──
+# Zero-import mirror of host_contract.all_remote_hook_markers() (the PostToolUse
+# hook may not import the contract — D2). TestHookMirrors requires exact
+# equality; resolve-brain-db.sh holds the shell copy, and
+# tests/test_remote_hook_machine.py runs every manifest command against the
+# contract's markers.
+REMOTE_HOOK_MARKERS = (
+    ('CLAUDE_CODE_ENTRYPOINT', 'remote_cowork'),
+)
+
+# SessionStart's one line on such a machine (boot-brain.sh prints it). Its
+# stdout reaches the model there, and a session the brain silently skips leaves
+# the operator wondering why memory went quiet — the gate notice's reasoning.
+REMOTE_HOOK_NOTICE = (
+    "[brain] Automatic memory isn't active in this environment yet — this session's "
+    "hooks run on a remote machine that can't reach the brain on the operator's "
+    "computer, so nothing is recalled or recorded here. Tell the operator in one "
+    "line at your first reply.")
+
+
+def daemon_unreachable_here():
+    """True when this hook process runs on a machine with no route to the
+    daemon: the host marks it remote (host_contract `remote_hooks`) and the OS
+    is not macOS. The daemon lives on the operator's Mac, so a Mac is never such
+    a machine, whatever the marker says — a host that runs its hooks locally
+    under the same marker keeps working. A Linux host running Entity natively
+    carries no marker. One env lookup on every other machine."""
+    if not any(os.environ.get(env) == value for env, value in REMOTE_HOOK_MARKERS):
+        return False
+    return os.uname().sysname != "Darwin"
+
+
+def exit_if_daemon_unreachable():
+    """End this hook silently (exit 0) on a machine with no route to the
+    daemon. Every hook that needs the daemon reaches it through here: the three
+    daemon helpers below call it first, and post_tool_trace, which owns its own
+    socket, calls it itself. SystemExit passes through run_hook, so no error is
+    logged and no fallback output is printed. Hooks that need no daemon (the
+    tool-call stamp) never call it, which is why it is not a run_hook gate."""
+    if daemon_unreachable_here():
+        print("[brain] no route to the brain daemon from this machine — hook skipped",
+              file=sys.stderr)
+        sys.exit(0)
+
+
 # Tail window for the transcript read: assistant entries land on every tool
 # call, so the last one is always within a few KB of the end — a full
 # readlines() over a session-long transcript (tens of MB) on the prompt hot
@@ -286,56 +376,84 @@ def host_tells():
 _TRANSCRIPT_TAIL_BYTES = 256 * 1024
 
 
-def turn_model(hook_input):
+def turn_model(hook_input, closing=None):
     """The model this turn ran on, or '' when the payload doesn't say.
 
-    Codex: the payload's `model`. Claude Code: the LAST main-thread assistant
-    entry in the transcript — at Stop that is this turn's model; at
-    UserPromptSubmit it is the previous turn's (the model the operator was
-    talking to when the prompt arrived; '' on a session's first prompt, and the
-    Stop hook fills it). Sidechain entries (subagents, which may run on a
-    different model) are skipped — they are not the operator's turn.
-
-    The tail window is the normal read; when it holds no main-thread assistant
-    entry (one oversized tool result, or a subagent's sidechain, can push the
-    last one out of the window) the whole file is scanned once — rare, and
-    the alternative is an unstamped turn plus a spurious model-unset error."""
+    Codex: the payload's `model`. Claude Code: the closing message's model
+    (closing_message; pass `closing` when the caller already read it) — at
+    Stop that is this turn's; at UserPromptSubmit it is the previous turn's
+    (the model the operator was talking to when the prompt arrived; '' on a
+    session's first prompt, and the Stop hook fills it)."""
     m = hook_input.get("model")
     if isinstance(m, str) and m.strip():
         return m.strip()
+    if closing is None:
+        closing = closing_message(hook_input)
+    return closing["model"] if closing else ""
+
+
+def closing_message(hook_input):
+    """The last main-thread assistant message in a Claude Code transcript, or
+    None when there is none (no transcript_path, no assistant reply yet, an
+    unreadable file): {"model", "tool_calls": [(name, input), …]}. At Stop it
+    is the message that closed this turn — host_contract.read_reply records
+    the reply tools among its calls. `model` is the newest non-empty model on
+    a main-thread entry, the closing message's own unless it carries none.
+    Sidechain entries (subagents, which may run on a different model) are
+    skipped — they are not the operator's turn.
+
+    The tail window is the normal read; when it holds no main-thread assistant
+    entry, or none with a model (one oversized tool result, or a subagent's
+    sidechain, can push it out of the window), the whole file is scanned once
+    — rare, and the alternative is an unstamped turn plus a spurious
+    model-unset error."""
     path = hook_input.get("transcript_path")
     if not path:
-        return ""
+        return None
     path = os.path.expanduser(path)
     try:
         size = os.path.getsize(path)
-        model = _last_main_assistant_model(path, max(0, size - _TRANSCRIPT_TAIL_BYTES))
-        if not model and size > _TRANSCRIPT_TAIL_BYTES:
-            model = _last_main_assistant_model(path, 0)
-        return model
+        closing = _closing_message(path, max(0, size - _TRANSCRIPT_TAIL_BYTES))
+        if (closing is None or not closing["model"]) and size > _TRANSCRIPT_TAIL_BYTES:
+            closing = _closing_message(path, 0) or closing
+        return closing
     except OSError:
-        return ""
+        return None
 
 
-def _last_main_assistant_model(path, start):
-    """message.model of the last non-sidechain assistant entry at or after byte
-    `start` of the transcript, or ''. Raises OSError on a read failure."""
+def _closing_message(path, start):
+    """closing_message over the transcript from byte `start`. One message is
+    every main-thread assistant entry sharing the last one's message.id (the
+    host writes one entry per content block). Raises OSError on a read
+    failure."""
     with open(path, "rb") as f:
         f.seek(start)
         lines = f.read().decode("utf-8", errors="replace").splitlines()
+    seen, done, closing_id, calls, model = False, False, None, [], ""
     for line in reversed(lines):
         try:
             entry = json.loads(line)
         except ValueError:
             continue   # the first line of a tail window is usually a partial record
         if not isinstance(entry, dict) or entry.get("type") != "assistant" \
-                or entry.get("isSidechain"):
+                or entry.get("isSidechain") or not isinstance(entry.get("message"), dict):
             continue
-        msg = entry.get("message")
-        model = msg.get("model") if isinstance(msg, dict) else None
-        if isinstance(model, str) and model.strip():
-            return model.strip()
-    return ""
+        msg = entry["message"]
+        if not seen:
+            seen, closing_id = True, msg.get("id")
+        elif closing_id is None or msg.get("id") != closing_id:
+            done = True
+        if not done:
+            calls.extend((b.get("name") or "", b.get("input") or {})
+                         for b in msg.get("content") or ()
+                         if isinstance(b, dict) and b.get("type") == "tool_use")
+        if not model and isinstance(msg.get("model"), str) and msg["model"].strip():
+            model = msg["model"].strip()
+        if done and model:
+            break
+    if not seen:
+        return None
+    return {"model": model, "tool_calls": calls[::-1]}
 
 
 # ── Host tool-input shapes ──
@@ -442,7 +560,7 @@ def strip_caller_stamp(tool_input):
     rewrites the brain's tool arguments with `_caller_session` + `_caller_sig`
     (servers.dispatch_common owns both keys); anything that RECORDS a tool
     input — the PostToolUse trace — must drop them first, or a valid pair lands
-    in a trace the model can recall and replay as another stream's identity.
+    in a trace the model can recall and replay as another session's identity.
     Keyed on the shared `_caller_` prefix rather than an import: this runs on
     every tool call."""
     if not isinstance(tool_input, dict):
@@ -454,10 +572,15 @@ def emit_updated_input(hook_event_name, tool_name, updated_input):
     """PreToolUse only, brain tools only: hand the host a rewritten tool input.
 
     Both hosts apply `permissionDecision: "allow"` + `updatedInput` the same
-    way — the object REPLACES the tool's arguments before the call runs — and
-    neither applies the rewrite without the `allow`. That `allow` is the brain
-    permitting its OWN MCP tools, the one tool family a memory plugin may
-    approve for itself, so this writer refuses any other `tool_name`
+    way: the object REPLACES the tool's arguments before the call runs. They
+    differ on the `allow`. Codex 0.159.2 rejects a rewrite that comes without
+    it and runs the original input, and its `allow` approves only the rewrite;
+    the tool's own approval still runs (brain node c264d7cf). Claude Code
+    2.1.270 applies the rewrite with or without it, and there the `allow` also
+    answers the permission prompt (3f6c7bd0, probe H1; bc9e9e30). So the
+    `allow` is always sent, and on Claude Code it is the brain permitting its
+    OWN MCP tools, the one tool family a memory plugin may approve for itself.
+    That is why this writer refuses any other `tool_name`
     (servers.dispatch_common.is_brain_tool) — a widened matcher cannot turn it
     into an auto-approve of a user's tool. Any other event, tool, or a non-dict
     input emits nothing and is logged. Flushes stdout so a caller may os._exit()
@@ -561,7 +684,9 @@ def daemon_available(timeout=2.0):
     Delegates to daemon_client.is_daemon_responsive(), the single source of
     truth. A hung "corpse" that holds the port but never replies reads as
     unavailable here, so recovery can fire; a slow-but-alive daemon still
-    answers and reads as available."""
+    answers and reads as available. On a machine with no route to the daemon
+    the hook ends here instead (exit_if_daemon_unreachable)."""
+    exit_if_daemon_unreachable()
     try:
         from servers.daemon_client import is_daemon_responsive
         return is_daemon_responsive(timeout=timeout)
@@ -576,9 +701,11 @@ def daemon_call(cmd, args=None, timeout=10.0):
     The quiet sibling of daemon_call_raw: same wire (daemon_client owns it),
     no logging — for callers that treat a daemon-down as a non-event.
     """
+    exit_if_daemon_unreachable()
     try:
         from servers.daemon_client import send_command
-        resp = send_command(cmd, args, timeout=timeout)
+        from servers.daemon_config import CLIENT_ROLE_HOOK
+        resp = send_command(cmd, args, timeout=timeout, role=CLIENT_ROLE_HOOK)
         return resp.get("result", {}) if resp.get("ok") else {}
     except Exception:
         return {}
@@ -595,9 +722,11 @@ def daemon_call_raw(cmd, args=None, timeout=10.0):
 
     On error: always prints [BRAIN ERROR] to stderr so Claude sees it.
     """
+    exit_if_daemon_unreachable()
     try:
         from servers.daemon_client import send_command
-        resp = send_command(cmd, args, timeout=timeout)
+        from servers.daemon_config import CLIENT_ROLE_HOOK
+        resp = send_command(cmd, args, timeout=timeout, role=CLIENT_ROLE_HOOK)
     except Exception as e:
         # The client module itself is unreachable (import/path failure) — a
         # hook must degrade, never crash the session.

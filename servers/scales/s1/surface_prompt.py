@@ -33,7 +33,7 @@ Don't re-search the message's own topic in other words — the candidates came f
 Four XML sections, oldest first:
 
 - <partnership_context> — what the assistant already has in mind: vocabulary, current threads. A hint, not a filter: a candidate that adds detail beyond it is a good pick, not a duplicate.
-- <conversation> — recent turns, oldest first. Each <turn> holds <user> and <assistant>. A turn's <shown> elements are memories already given to the assistant on that turn.
+- <conversation> — recent turns, oldest first. A turn holds what started it, then the assistant's reply: <user> when the user wrote it; <harness> when the assistant's host delivered it (another session's message, a background task's result); <subagent> when a subagent the assistant delegated to reported back. A turn's <shown> elements are memories already given to the assistant on that turn.
 - The turn marked current_msg="true" is the message you pick for — no reply yet. Everything before it is context.
 - <candidates> — the menu. Each <candidate> carries its id attribute; its body opens [type] "title" (id, flags, age), then content and when it applies. In no particular order — match on meaning, not position. locked="true": operator-confirmed important. source_tool="true": from your own tool call — same bar as the rest.
 

@@ -98,8 +98,10 @@ unset PYTHONHOME
 # the venv (pyvenv.cfg is found from the venv/bin symlink) and the dylib load
 # path (@executable_path/../lib, relative to the link's own directory) while
 # the kernel reports the role. Names stay within 15 chars — the Linux comm
-# limit (macOS shows 16). Per-session roles carry the session id's first 4
-# hex chars, the short prefix self_presence shows:
+# limit (macOS shows 16). Per-session roles carry the last 4 characters of
+# the session's short (trace_contract.session_short, the hyphen-free tail
+# self_presence shows) — all of it would not fit; tests/test_deploy_contract.py
+# pins the tag to the owner:
 #
 #   brain_python_as Entity-mcp "$CLAUDE_CODE_SESSION_ID"  → venv/bin/Entity-mcp-3207
 #
@@ -108,7 +110,7 @@ unset PYTHONHOME
 brain_python_as() {
     _role="$1"
     _name="$1"
-    [ -n "${2:-}" ] && _name="$1-$(printf '%.4s' "$2")"
+    [ -n "${2:-}" ] && _name="$1-$(printf '%s' "$2" | tr -d '-' | tail -c 4)"
     if [ ${#_name} -gt 15 ]; then
         echo "[brain-env] WARN: process name '$_name' exceeds 15 chars — running as python" >&2
         echo "$BRAIN_PYTHON"; return 0

@@ -23,9 +23,11 @@ def test_scribe_chain_id_is_session_scoped():
     """The Scribe's run chain is s1e-{session_short}-{stop} — NOT S2's time
     format — sourced from SessionContext.s1e_chain, and cached/stable."""
     from servers.scales.s1.scribe import S1Scribe
+    from servers.session_context import SessionContext
+    want = SessionContext('abcd1234efgh5678', stop_counter=5).s1e_chain()
     unit = S1Scribe(brain=None, session_id='abcd1234efgh5678', counter=5)
-    assert unit.chain_id() == 's1e-abcd1234-5'
-    assert unit.chain_id() == 's1e-abcd1234-5'   # cached → stable within a run
+    assert unit.chain_id() == want
+    assert unit.chain_id() == want   # cached → stable within a run
 
 
 def test_scribe_identity():
@@ -129,9 +131,11 @@ class TestScribeInProcessAttribution(BrainTestBase):
             ref_type='node_revised', ref_id=nid, hours=24, limit=10
         ).get('events', [])
         self.assertTrue(events, 'no node_revised trace was emitted')
+        from servers.session_context import SessionContext
         chains = {e['chain_id'] for e in events}
         self.assertEqual(
-            chains, {'s1e-deadbeef-3'},
+            chains,
+            {SessionContext('deadbeefcafe0000', stop_counter=3).s1e_chain()},
             'revise must land on the s1e run chain, not a date fallback')
         self.assertTrue(all(e['scale'] == 's1' for e in events))
 

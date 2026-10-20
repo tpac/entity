@@ -583,9 +583,9 @@
 .journal-peek-body { overflow-y: auto; padding: 8px 12px 12px; }
 
 /* ══════════════════════════════════════════════════════════════════════
-   Session identity — owned by lib/sessions.js. A stream is a name and a
-   hue; the hue is what keeps several live streams legible when their
-   streams interleave in one chronological feed.
+   Session identity — owned by lib/sessions.js. A session is a name and a
+   hue; the hue is what keeps several live sessions legible when their
+   activity interleaves in one chronological feed.
    ══════════════════════════════════════════════════════════════════════ */
 
 .session-chip {
@@ -606,19 +606,19 @@
 .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ══════════════════════════════════════════════════════════════════════
-   The stream rail — who is thinking, and which stream the feed is on.
+   The session rail — who is thinking, and which session the feed is on.
    ══════════════════════════════════════════════════════════════════════ */
 
-.stream-rail {
+.session-rail {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
   padding: 6px 8px;
   border-bottom: 1px solid var(--border-faint);
 }
-.stream-rail:empty { display: none; }
+.session-rail:empty { display: none; }
 
-.stream-pill {
+.session-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -633,31 +633,31 @@
   max-width: 24ch;
   transition: border-color 0.12s, color 0.12s, background 0.12s;
 }
-.stream-pill:hover { color: var(--text-body); border-color: var(--border-strong); }
-.stream-pill--active {
-  border-color: var(--stream-color, var(--accent-blue));
-  background: color-mix(in srgb, var(--stream-color, var(--accent-blue)) 12%, transparent);
+.session-pill:hover { color: var(--text-body); border-color: var(--border-strong); }
+.session-pill--active {
+  border-color: var(--session-color, var(--accent-blue));
+  background: color-mix(in srgb, var(--session-color, var(--accent-blue)) 12%, transparent);
   color: var(--text-body);
 }
-.stream-pill--dormant { opacity: 0.55; }
-/* The collapsed resting group. Dashed so it reads as a container, not a stream. */
-.stream-pill--more {
+.session-pill--dormant { opacity: 0.55; }
+/* The collapsed resting group. Dashed so it reads as a container, not a session. */
+.session-pill--more {
   border-style: dashed;
   color: var(--text-subtle);
   font-size: var(--fs-xxs);
 }
-.stream-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stream-pill-count { color: var(--text-subtle); font-size: var(--fs-xxs); }
-.stream-pill-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; opacity: 0.55; }
-/* A live stream breathes. Dormant ones hold still — the difference should be
+.session-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-pill-count { color: var(--text-subtle); font-size: var(--fs-xxs); }
+.session-pill-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; opacity: 0.55; }
+/* A live session breathes. Dormant ones hold still — the difference should be
  * visible without reading the label. */
-.stream-pill-dot--live { opacity: 1; animation: streamBreath 2.6s ease-in-out infinite; }
-@keyframes streamBreath {
+.session-pill-dot--live { opacity: 1; animation: sessionBreath 2.6s ease-in-out infinite; }
+@keyframes sessionBreath {
   0%, 100% { transform: scale(1);    opacity: 1; }
   50%      { transform: scale(0.72); opacity: 0.5; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .stream-pill-dot--live { animation: none; }
+  .session-pill-dot--live { animation: none; }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1087,19 +1087,19 @@
 .journal-group-count { margin-left: auto; color: var(--text-faint); font-size: var(--fs-xxs); }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Streams tab — the chat
+   Sessions tab — the chat
    -------------------------------------------------------------------
    The conversation is the tab's main pane; the roster of who's talking
    is the rail beside it (and under it on a narrow window). Reading
    order is a chat's: oldest at the top, newest above the composer.
    ═══════════════════════════════════════════════════════════════════ */
 
-#tab-streams.active { display: flex; flex-direction: column; overflow: hidden; }
+#tab-sessions.active { display: flex; flex-direction: column; overflow: hidden; }
 /* row-reverse, not a reordered DOM: the conversation list sits on the LEFT
    where every messaging app puts it, while the markup keeps the conversation
    first — so when the layout stacks on a narrow window (below), the chat is
    what lands at the top of the page. */
-.streams-layout { display: flex; flex-direction: row-reverse; flex: 1; min-height: 0; }
+.sessions-layout { display: flex; flex-direction: row-reverse; flex: 1; min-height: 0; }
 
 .chat-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .chat-head {
@@ -1148,7 +1148,7 @@
 .chat-to--all{ color: var(--accent-purple); }
 .chat-time   { color: var(--text-faint); }
 
-/* The bubble is tinted by its SENDER's hue — the same hue the stream
+/* The bubble is tinted by its SENDER's hue — the same hue the session
    carries in the rail, the Live feed and the graph. */
 .chat-bubble {
   background: var(--bg-panel);
@@ -1172,7 +1172,7 @@
 .chat-more  { color: var(--accent-blue); font-size: var(--fs-xs); margin-top: 4px; }
 .chat-refs  { color: var(--text-subtle); font-size: var(--fs-xs); font-family: var(--font-mono); margin-top: 4px; }
 
-/* Delivery as a read receipt: ✓ sent, ✓✓ actually consumed by a stream. */
+/* Delivery as a read receipt: ✓ sent, ✓✓ actually consumed by a session. */
 .chat-receipt        { font-size: var(--fs-xxs); margin-top: 3px; }
 .chat-receipt--read  { color: #5a8a5a; }
 .chat-receipt--sent  { color: #806a3a; }
@@ -1198,12 +1198,12 @@
 .chat-input:focus { outline: none; border-color: var(--accent-blue); }
 .chat-send-status { color: var(--text-muted); font-size: var(--fs-sm); }
 
-/* The thread header — the open conversation's stream pane sits here. */
+/* The thread header — the open conversation's session pane sits here. */
 .chat-thread { flex-shrink: 0; padding: 0 var(--space-3); }
 .chat-thread:empty { display: none; }
 
 /* ── The conversation list (the rail) ──────────────────────────────── */
-.streams-rail {
+.sessions-rail {
   width: 300px; flex-shrink: 0; overflow-y: auto;
   border-right: 1px solid var(--border-faint);
 }
@@ -1247,7 +1247,7 @@
   color: var(--text-muted); font-size: var(--fs-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* Not a message — identity cues (model · turns · hex) for a stream that hasn't
+/* Not a message — identity cues (model · turns · hex) for a session that hasn't
    said anything yet. Monospace and dim so it can never be misread as speech. */
 .conv-preview--cues {
   color: var(--text-subtle); font-family: var(--font-mono); font-size: var(--fs-xs);
@@ -1257,9 +1257,9 @@
 /* Narrow: the rail stops being a rail and stacks UNDER the chat — the
    conversation keeps the top of the page either way. */
 @media (max-width: 900px) {
-  .streams-layout { flex-direction: column; }
+  .sessions-layout { flex-direction: column; }
   .chat-col { min-height: 55vh; }
-  .streams-rail {
+  .sessions-rail {
     width: auto; max-height: 40vh;
     border-left: none; border-top: 1px solid var(--border-faint);
   }
@@ -1361,9 +1361,9 @@
 .thal-ledger-via  { color: var(--accent-purple); font-size: var(--fs-xxs); }
 .thal-ledger-when { margin-left: auto; color: var(--text-faint); }
 
-/* ── A stream's OWN chat (identity cue in the thread header) ────────── */
+/* ── A session's OWN chat (identity cue in the thread header) ────────── */
 /* These lines are the operator talking to THAT session — they were never sent
-   to another stream. So they get a transcript language, not the bubble one:
+   to another session. So they get a transcript language, not the bubble one:
    no bubble, no sender hue, no receipt. Looking at the two side by side, it
    must be impossible to mistake one for the other. */
 .own-chat {
@@ -1385,7 +1385,7 @@
 }
 .own-chat-who { flex-shrink: 0; font-weight: 600; }
 .own-chat-who--operator { color: var(--accent-green); }
-.own-chat-who--stream   { color: var(--text-subtle); }
+.own-chat-who--session   { color: var(--text-subtle); }
 .own-chat-text {
   color: var(--text-muted); min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1393,3 +1393,53 @@
 /* Drilled open, the lines stop being one-liners — still a transcript. */
 .own-chat.is-open .own-chat-text { white-space: normal; overflow: visible; }
 .own-chat-empty { color: var(--text-faint); font-size: var(--fs-sm); font-style: italic; }
+
+/* ── Config tab + the cross-tab pause banner (tabs/config.js) ─────────────
+   The banner sits under the tab bar, outside every tab-content; amber, not
+   red — a paused brain is a chosen state, not a failure. */
+.gate-banner {
+  display: flex; align-items: center; gap: var(--space-3); flex-shrink: 0;
+  background: #3a2a0a; border-bottom: 1px solid var(--accent-amber);
+  color: #ffd58a; padding: var(--space-2) var(--space-4); font-size: var(--fs-md);
+}
+.gate-banner-btn { margin-left: auto; }
+
+.cfg-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: var(--space-2); padding: var(--space-2);
+}
+.cfg-card {
+  background: var(--bg-panel); border: 1px solid var(--border-faint);
+  border-radius: var(--radius-xl); padding: 10px 12px;
+}
+.cfg-card--wide { grid-column: 1 / -1; }
+.cfg-card-title { color: var(--text-heading); font-weight: bold; font-size: var(--fs-lg); margin-bottom: 6px; }
+.cfg-row {
+  display: flex; gap: var(--space-2); align-items: baseline; flex-wrap: wrap;
+  padding: 3px 0; font-size: var(--fs-md);
+}
+.cfg-key { color: var(--text-muted); min-width: 120px; }
+.cfg-val { color: var(--text-body); display: flex; gap: 4px; flex-wrap: wrap; align-items: baseline; }
+.cfg-val--mono { font-family: var(--font-mono); word-break: break-all; }
+.cfg-pill {
+  background: var(--bg-raised); border: 1px solid var(--border-base);
+  border-radius: 10px; padding: 1px 8px; font-size: var(--fs-sm); color: var(--text-muted);
+}
+.cfg-pill--ok   { color: var(--accent-green); border-color: #1a3a1a; }
+.cfg-pill--bad  { color: var(--accent-red);   border-color: #3a1a1a; }
+.cfg-pill--warn { color: var(--accent-amber); border-color: #3a2a0a; }
+.cfg-note { color: var(--text-muted); font-size: var(--fs-sm); margin-top: 6px; line-height: 1.45; }
+.cfg-warn {
+  background: #3a1a1a; border: 1px solid var(--accent-red); color: #ff9999;
+  padding: 6px 10px; border-radius: var(--radius-md); font-size: var(--fs-md); margin: 6px 0;
+}
+.cfg-btn {
+  background: var(--bg-raised); border: 1px solid var(--border-strong); color: var(--text-heading);
+  padding: 5px 12px; border-radius: var(--radius-md); cursor: pointer; font-size: var(--fs-md);
+}
+.cfg-btn:disabled { opacity: .5; cursor: default; }
+.cfg-btn--danger { border-color: var(--accent-amber); color: var(--accent-amber); }
+.cfg-link { color: var(--accent-blue); font-size: var(--fs-sm); }
+.cfg-table { width: 100%; border-collapse: collapse; font-size: var(--fs-md); margin-top: 4px; }
+.cfg-table th { text-align: left; color: var(--text-subtle); font-weight: normal; font-size: var(--fs-sm); padding: 2px 6px; }
+.cfg-table td { padding: 3px 6px; border-top: 1px solid var(--border-faint); }

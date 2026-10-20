@@ -9,7 +9,7 @@ Uses the s2_healer interaction (learnable prompt in interactions table).
 import json
 import time
 
-from servers.trace_contract import build_delta_metadata
+from servers.trace_contract import INCOMING_SPEAKERS, build_delta_metadata
 
 from .base import IntegrationUnit, read_usage, sum_usage
 from .healer_contract import HEALER
@@ -42,9 +42,7 @@ class HealerEncoder(IntegrationUnit):
         seconds resolution — a closure built on the ORCHESTRATOR would put
         node_revised rows and this instance's `healer_generated` delta on
         two different chains, one pass rendering as two phantom runs
-        (plan step 10). Caveat: a dispatch_fn injected at construction
-        (tests, evals) is honored verbatim by the base and bypasses this
-        attribution — production constructs with None."""
+        (plan step 10)."""
         if self._dispatch_fn is None:
             self._dispatch_fn = self._make_encoder_dispatch()
         return self._dispatch_fn
@@ -102,7 +100,7 @@ class HealerEncoder(IntegrationUnit):
             model = call_tel.get('model', '') or model
 
             if result is None:
-                errors.append('LLM call failed for batch %d' % batches)
+                errors.append('%s for batch %d' % (call_tel['failure'], batches))
                 continue
 
             if isinstance(result, list):
@@ -325,9 +323,9 @@ class HealerEncoder(IntegrationUnit):
                         lines.append('  Window %d — anchors: %s' % (i, refs))
                         for turn in window['turns']:
                             ref_type = turn.get('ref_type', '')
-                            role = ('operator' if ref_type == 'user_message' else
-                                    'assistant' if ref_type == 'assistant_message' else
-                                    ref_type or turn['role'])
+                            role = (INCOMING_SPEAKERS.get(ref_type) or
+                                    ('assistant' if ref_type == 'assistant_message' else
+                                     ref_type or turn['role']))
                             content = (turn.get('content') or '')[:200]
                             lines.append('    [%s] %s' % (role, content))
             else:

@@ -1,26 +1,14 @@
 """Brain Voice — the text the brain hands Claude.
 
 BrainVoice is a collaborator object (not a mixin) that takes a Brain instance
-and formats: the boot block (bare text, served by the context_boot command),
-recall results for the MCP recall tools, and the pre-edit suggestion block
-(wrapped in [BRAIN]...[/BRAIN]).
+and formats: the boot block (bare text, served by the context_boot command)
+and recall results for the MCP recall tools.
 """
 
 import os
 
-from .contract import TITLE_REF_LIMIT, TITLE_WARN_LIMIT
-from .loud_truncation import cap_text_loud
 from .daemon_config import get_agent_name, agent_name_is_default
 from .brain_constants import dashboard_setup_url
-
-
-# ── Suggestion grouping (format_suggestions) ──
-
-ENGINEERING_TYPES = {"purpose", "mechanism", "impact", "constraint", "convention",
-                     "lesson", "vocabulary"}
-CODE_COGNITION_TYPES = {"fn_reasoning", "param_influence", "code_concept",
-                        "arch_constraint", "causal_chain", "bug_lesson",
-                        "comment_anchor"}
 
 
 class BrainVoice:
@@ -29,7 +17,6 @@ class BrainVoice:
     Usage:
         voice = BrainVoice(brain)
         voice.format_recall_results(results, lines)
-        output = voice.format_suggestions(filename, suggestions, ...)
     """
 
     def __init__(self, brain):
@@ -51,97 +38,6 @@ class BrainVoice:
         cfg = node_format_for(len(results))
         for r in results:
             BrainVoice.format_node(r, lines, cfg)
-
-    @staticmethod
-    def format_suggestions(filename, suggestions, procedures, context_files,
-                           change_impacts):
-        """Format brain suggestions into readable output for pre-edit hook."""
-        lines = ["[BRAIN] AUTO-SUGGEST for %s:" % filename, ""]
-
-        eng_nodes = [s for s in suggestions if s.get("type") in ENGINEERING_TYPES]
-        code_nodes = [s for s in suggestions if s.get("type") in CODE_COGNITION_TYPES]
-        other_nodes = [s for s in suggestions if (
-            s.get("type") not in ENGINEERING_TYPES
-            and s.get("type") not in CODE_COGNITION_TYPES
-            and s.get("type") != "procedure"
-            and not (s.get("type") == "file" and "[ctx:" in s.get("title", ""))
-        )]
-
-        if change_impacts:
-            lines.append("CHANGE IMPACT WARNING:")
-            lines.append("")
-            for ci in change_impacts[:5]:
-                ci_title = cap_text_loud(ci.get("title", ""),
-                                        TITLE_WARN_LIMIT)
-                ci_content = cap_text_loud(ci.get("content", ""), 300)
-                lines.append("  [impact] " + ci_title)
-                lines.append("    " + ci_content)
-                lines.append("")
-
-        if eng_nodes:
-            lines.append("ENGINEERING MEMORY (read carefully — these describe what you are about to edit):")
-            lines.append("")
-            for s in eng_nodes:
-                typ = s.get("type", "?")
-                title = cap_text_loud(s.get("title", ""),
-                                     TITLE_REF_LIMIT)
-                content = cap_text_loud(s.get("content", ""), 350)
-                locked = "LOCKED " if s.get("locked") else ""
-                lines.append("  [%s] %s%s" % (typ, locked, title))
-                lines.append("    " + content)
-                lines.append("")
-
-        if code_nodes:
-            lines.append("CODE KNOWLEDGE:")
-            lines.append("")
-            for s in code_nodes:
-                typ = s.get("type", "?")
-                title = cap_text_loud(s.get("title", ""),
-                                     TITLE_REF_LIMIT)
-                content = cap_text_loud(s.get("content", ""), 350)
-                locked = "LOCKED " if s.get("locked") else ""
-                lines.append("  [%s] %s%s" % (typ, locked, title))
-                lines.append("    " + content)
-                lines.append("")
-
-        if other_nodes:
-            if code_nodes:
-                lines.append("OTHER RULES & DECISIONS:")
-            lines.append("")
-            for s in other_nodes:
-                typ = s.get("type", "?")
-                title = cap_text_loud(s.get("title", ""),
-                                     TITLE_REF_LIMIT)
-                content = cap_text_loud(s.get("content", ""), 250)
-                locked = "LOCKED " if s.get("locked") else ""
-                lines.append("  [%s] %s%s" % (typ, locked, title))
-                lines.append("    " + content)
-                lines.append("")
-
-        if procedures:
-            lines.append("TRIGGERED PROCEDURES:")
-            for p in procedures[:3]:
-                lines.append("  [procedure] " + p.get("title", ""))
-                psteps = cap_text_loud(p.get("steps", ""), 300)
-                lines.append("    " + psteps)
-                lines.append("")
-
-        if context_files:
-            lines.append("CONTEXT FILES (read before editing — may contain detailed requirements):")
-            for cf in context_files[:2]:
-                cftopic = cf.get("topic", "")
-                cftitle = cf.get("title", "")
-                cfupdated = str(cf.get("last_updated", ""))[:10]
-                cfsummary = str(cf.get("summary", ""))[:150]
-                lines.append("  [%s] %s (updated %s)" % (cftopic, cftitle, cfupdated))
-                lines.append("    " + cfsummary)
-                lines.append("")
-            lines.append("IMPORTANT: If the context file conflicts with current work, flag the conflict.")
-            lines.append("")
-
-        lines.append("Review these constraints before proceeding with the edit.")
-        lines.append("[/BRAIN]")
-        return "\n".join(lines)
 
     @staticmethod
     def llm_paused_notice(brain) -> str:
@@ -234,9 +130,9 @@ class BrainVoice:
           1. The identity stance (SKILL.md), FIRST — the always-on prior,
              read via _load_stance().
           2. Brain state: identity line (name + memory/locked counts) +
-             MY_STREAM_ID, the Frame (ctx.get_frame(brain) — Session /
-             Current focus), standing items, and the boot
-             delivery (channels/delivery.py — the brain's due items).
+             MY_SESSION_ID, the Frame (ctx.get_frame(brain) — Session /
+             Current focus), and standing items. Due Thalamus items are
+             NOT here — they deliver at the first operator prompt.
 
         Each brain-state part runs as a _boot_section: failure-isolated,
         logged loudly, boot continues without it.
@@ -255,15 +151,14 @@ class BrainVoice:
         # ── Gather data ──
         ctx = brain.boot_stats()
         # Boot COMMITS: the liveness stamp (next line), health auto-fix, the
-        # session row (get_or_create_session), the delivery ledger rows + the
-        # s0 delivery trace (deliver()), and brain.save() at the end. What it
+        # session row (get_or_create_session), and brain.save() at the end. What it
         # does NOT do is reset the session — the caller owns that (boot_brain's
         # reset_session(cwd), or _boot_via_direct's explicit reset); a second
         # reset here once made boot a double-reset that needed a cwd-preserve
         # band-aid.
-        # Boot-stamp liveness so this fresh stream shows up in presence
+        # Boot-stamp liveness so this fresh session shows up in presence
         # immediately — before its first turn — closing the rendezvous gap where
-        # two just-booted streams can't see each other (2026-06-06).
+        # two just-booted sessions can't see each other (2026-06-06).
         brain.stamp_boot_liveness(session_id)
 
         brain.health_check(session_id="session_boot", auto_fix=True)
@@ -273,11 +168,11 @@ class BrainVoice:
         counts = (ctx.get("total_nodes", "?"), ctx.get("total_locked", "?"))
         out.append("I'm %s and I have %s memories, %s locked." % ((name,) + counts))
         if session_id:
-            # Hand each stream its own self-channel id at boot. The self-channel
-            # addresses streams by this id (self_inbox / self_send / presence);
+            # Hand each session its own self-channel id at boot. The self-channel
+            # addresses sessions by this id (self_inbox / self_send / presence);
             # before this it was unobtainable without forensics (2026-06-04), so
-            # a stream couldn't drain its own inbox or arm a watcher cleanly.
-            out.append("MY_STREAM_ID: %s" % session_id)
+            # a session couldn't drain its own inbox or arm a watcher cleanly.
+            out.append("MY_SESSION_ID: %s" % session_id)
 
         # ── Zero-Memory block — the Nursery's spoken half. boot_stats'
         # gate says when (young brain: under ZERO_MEMORY_MIN_LIVED non-seed
@@ -322,9 +217,8 @@ class BrainVoice:
         # Built via SessionContext to honor the per-session shape: current_focus
         # is session-scoped (a per-session key). When session_id is missing or Frame Constructor fails, log loudly
         # and continue without the prior — explicit degraded mode.
-        # session_ctx is its own section, not the Frame's: the delivery leg
-        # below needs it too (the caller owns the trace chain), and a Frame
-        # failure must not take the context down with it.
+        # session_ctx is its own section, not the Frame's: a Frame failure
+        # must not take the session row down with it.
         session_ctx = self._boot_section(
             'session_ctx',
             lambda: brain.get_or_create_session(session_id) if session_id else None,
@@ -351,21 +245,10 @@ class BrainVoice:
             out.append(standing)
             out.append("")
 
-        # ── Delivery — the boot moment; eligibility, tracing, and the
-        # source walk live in channels/delivery.py. Its own section: a Frame
-        # failure must not silently cancel delivery (asks are boot-only — a
-        # skipped boot here is an ask nobody ever sees).
-        def delivery():
-            if not session_ctx:
-                return ''
-            # Boot never arms a continuation stamp (nothing blocks at a
-            # passive moment), so the traced ref_types are unused here.
-            from .channels.delivery import deliver, BOOT
-            return deliver(brain, session_ctx, BOOT)[0]
-        delivery_block = self._boot_section('delivery', delivery)
-        if delivery_block:
-            out.append(delivery_block)
-            out.append("")
+        # No delivery here: boot cannot tell an operator's session from one a
+        # scheduler opened, so the Thalamus delivers at the session's first
+        # operator prompt instead (daemon_hooks.hook_recall; ruling
+        # id:15e46fa9). Boot is policy-free — stance, state, Frame.
 
         brain.save()
 

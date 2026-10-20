@@ -51,3 +51,28 @@ def test_retired_tmp_dump_is_ignored(tmp_path, monkeypatch):
     (tmp_path / 'brain-judge-result-legacy99-3.json').write_text(json.dumps({
         'surface_prompt': 'OLD PROMPT', 'surface_output': 'OLD OUT'}))
     assert recalls.read_judge_payload('s1r-legacy99-3') == (None, None)
+
+
+def test_feed_reads_the_surface_row_not_a_tool_moment_row():
+    """s1r chains also carry the tool moment's tool_shown K rows; the feed's
+    'used' ids are the surface's, whichever K row the chain holds first."""
+    import json
+    import sqlite3
+    conn = sqlite3.connect(':memory:')
+    conn.execute(
+        "CREATE TABLE trace_events (id TEXT, chain_id TEXT, scale TEXT, "
+        "event_type TEXT, ref_type TEXT, ref_id TEXT, summary TEXT, "
+        "metadata TEXT, session_id TEXT, created_at TEXT)")
+    chain = 's1r-abcd1234-3'
+    rows = [
+        ('o1', 's1', 'O', 'recall', '', '2 candidates for: q', '{}'),
+        ('t1', 's1', 'K', 'tool_shown', '["7001aaaa"]', '1 shown at editing x',
+         json.dumps({'cue': 'editing x', 'agent_id': ''})),
+        ('k1', 's1', 'K', 'surface_selected', '["5e1ec7ed"]', '1 surfaced', '{}'),
+    ]
+    for i, (rid, scale, ev, ref, ref_id, summary, meta) in enumerate(rows):
+        conn.execute("INSERT INTO trace_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (rid, chain, scale, ev, ref, ref_id, summary, meta,
+                      'sess-a', '2026-10-09T10:00:0%dZ' % i))
+    (row,) = recalls.query_recall_log.__wrapped__(conn)
+    assert row['used_ids'] == ['5e1ec7ed']

@@ -55,16 +55,18 @@ from typing import Dict, Any
 from . import daemon_log
 from .brain_constants import LOGS_MAINTENANCE_INTERVAL_S
 from .daemon_config import (
-    AUTOSAVE_INTERVAL_SECONDS, SESSION_FLUSH_INTERVAL_SECONDS,
+    AUTOSAVE_INTERVAL_SECONDS, SESSION_FLUSH_INTERVAL_SECONDS, CLIENT_STAMP_KEY,
     SOCKET_BACKLOG, MAX_MESSAGE_SIZE, THREAD_POOL_SIZE,
     POOL_THREAD_PREFIX, THREAD_ALARM_MAX_OTHERS, DAEMON_LOG_KEEP_DAYS,
     REPO_ROOT,
     get_daemon_addr, get_pid_path, get_lock_path, get_status_path,
     get_db_lock_path, get_daemon_log_path,
 )
+from .contract import NOT_RUN_FIELD
 from .daemon_dispatch import COMMAND_TABLE, dispatch_command
 from .daemon_launch import runtime_ready, start_runtime_sync
-from .dispatch_common import caller_session
+from .dispatch_common import caller_session, check_client_code, ClientCodeWatch
+from .trace_contract import session_short
 
 
 def _thread_alarm(threads):
@@ -164,6 +166,8 @@ class BrainDaemon:
         # encode-thread pop race is benign.
         self._scribe_attempts = {}
         self._scribe_failures = {}
+        # The stale-copy check's sightings (dispatch_common.check_client_code).
+        self._client_watch = ClientCodeWatch()
         self._restart_count = 0
         self._reload_requested = False  # set by the `restart` command; start()
                                         # execs fresh code in place after teardown
@@ -181,12 +185,14 @@ class BrainDaemon:
         "hook_recall":               (False, True),
         "hook_post_response_track":  (True,  True),
         "hook_pre_edit":             (False, True),
-        "hook_pre_bash_safety":      (False, False),
         "hook_session_end":          (True,  True),
         "hook_stop_failure_log":     (True,  True),
         "hook_worktree_context":     (False, True),
         "hook_worktree_cleanup":     (True,  True),
     }
+    # Commands only an installed copy's hooks send: one arriving without a
+    # build stamp comes from a copy older than the stamp (check_client_code).
+    HOOK_CLIENT_COMMANDS = frozenset(HOOK_TABLE) | {"context_boot", "reset_session"}
 
     def start(self):
         """Supervisor loop — start daemon and restart on internal crashes.
@@ -892,6 +898,16 @@ class BrainDaemon:
 
             args = msg.get("args", {})
 
+            # Which code sent this? Best-effort: a failing check never costs
+            # the request.
+            try:
+                check_client_code(self.brain, cmd, args, msg.get(CLIENT_STAMP_KEY),
+                                  self._client_watch, self.HOOK_CLIENT_COMMANDS)
+            except Exception as e:
+                self._log("[thread:%s] client code check failed for %s: %s" % (t_name, cmd, e))
+                if self.brain is not None:
+                    self.brain._log_error('daemon:client_check', e, context='cmd=%s' % cmd)
+
             # The user-prompt clock gates S2 maintenance. Tool-use hooks,
             # internal IPC, pings are noise from S2's perspective.
             # See run_maintenance_if_due in brain.py.
@@ -937,7 +953,8 @@ class BrainDaemon:
         """
         if not self.brain.write_lock.acquire(timeout=10.0):
             self._log("Write lock timeout (10s) for: {}".format(cmd))
-            return {"ok": False, "error": "Write lock timeout — another operation is holding the lock"}
+            return {"ok": False, NOT_RUN_FIELD: True,
+                    "error": "Write lock timeout — another operation is holding the lock"}
         try:
             return fn()
         finally:
@@ -1006,8 +1023,8 @@ class BrainDaemon:
             # handler runs, because handlers that pass **args to a brain method
             # pop `_caller_session` (see dispatch_common._pop_session_ctx), so it
             # would be gone by the time _accumulate_touched runs. caller_session
-            # prefers an explicit session_id filter, else the proxy-stamped
-            # `_caller_session` — the write tools send only the latter.
+            # takes the proxy-stamped `_caller_session`; a session_id counts only
+            # on a headless call, so a filter read never redirects this.
             caller_sess = caller_session(args)
             # Execution goes through dispatch_command (the single chokepoint —
             # arg-contract validation + per-op loudness live there). The registry
@@ -1097,7 +1114,7 @@ class BrainDaemon:
         except Exception as e:
             try:
                 self.brain._log_error('accumulate_touched', e,
-                                      'cmd=%s sess=%s' % (cmd, str(sess)[:16]))
+                                      'sess=%s cmd=%s' % (session_short(str(sess)), cmd))
             except Exception:
                 pass
 
@@ -1473,7 +1490,7 @@ class BrainDaemon:
                             RuntimeError('encode running %ds — thread presumed '
                                          'hung; holds 1 of %d encode permits'
                                          % (int(mono - _hstart), MAX_CONCURRENT_ENCODES)),
-                            'session=%s' % _hsid[:8])
+                            'session=%s' % session_short(_hsid))
                     except Exception:
                         pass
 
@@ -1526,7 +1543,7 @@ class BrainDaemon:
                             'scribe_repeated_failure',
                             RuntimeError('session %s re-fired %d times without '
                                          'advancing the encode cadence — encode '
-                                         'is crashing or skipping' % (sid[:8], fails)),
+                                         'is crashing or skipping' % (session_short(sid), fails)),
                             'check s1e_* errors; turns_since_last_encode is stuck')
                     except Exception:
                         pass
@@ -1590,15 +1607,15 @@ class BrainDaemon:
             self._scribe_poll_running = False
 
     def _scribe_flush(self, timeout_s: float) -> Dict[str, Any]:
-        """Fast-forward idle: the Scribe poll runs as if every live stream had
+        """Fast-forward idle: the Scribe poll runs as if every live session had
         gone quiet for the tail-idle period, until nothing is due and nothing is
         encoding. The settle step of an eval golden needs it: a snapshot taken
         mid-exchange holds a turn production encodes only after an hour of
         quiet, and every arm cloned from it would otherwise encode that turn on
         its own, differently.
 
-        Same selection as production's tail (more than SCRIBE_TAIL_MIN_TURNS
-        pending; a stream with fewer stays pending, as it would in production),
+        Same selection as production's tail (at least SCRIBE_TAIL_MIN_TURNS
+        pending; a session with fewer stays pending, as it would in production),
         through the one poll: the regular tick keeps firing it, with its permits,
         per-session single-flight and retry cooldown, on the moved clock. The
         boot grace passes too. A session whose encode fails is cooling when the

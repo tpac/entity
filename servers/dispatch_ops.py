@@ -1,6 +1,6 @@
 """Daemon dispatch — lifecycle / config / admin handlers.
 
-ping, save, session reset, config, pre_edit, the eval-entity
+ping, save, session reset, config, the eval-entity
 triggers (s2_force / drain_embeddings), the eval escape hatch, and the
 one-off revision-history drop.
 """
@@ -10,7 +10,6 @@ import os
 import time
 
 from .daemon_config import _CODE_FINGERPRINT, _PROCESS_STARTED_AT, REPO_ROOT
-from .dispatch_common import caller_session
 from .scales.s1.encode_contract import ENCODE_EVERY
 
 
@@ -44,24 +43,6 @@ def _handle_ping(brain, args, graph_changes):
 def _handle_get_config(brain, args, graph_changes):
     return {"ok": True, "result": {"value": brain.get_config(
         args.get("key", ""), args.get("default", ""))}}
-
-
-def _handle_pre_edit(brain, args, graph_changes):
-    """Pre-edit handler. The expensive recall under suggest() is
-    deduplicated at the recall layer (brain.recall result cache + single
-    flight) so concurrent / repeat pre_edit calls collapse there. This
-    handler stays simple."""
-    file = args.get("file", "")
-    tool_name = args.get("tool_name") or ""
-    sid = caller_session(args)  # identity: per-session pre-edit surfacing
-    ctx = brain.get_or_create_session(sid) if sid else None
-    data = brain.pre_edit(file=file, tool_name=tool_name, ctx=ctx)
-    try:
-        data["change_impacts"] = brain.get_change_impact(file)
-    except Exception as e:
-        brain._log_error("pre_edit_change_impact", e, "fetching change impacts for %s" % file[:60])
-        data["change_impacts"] = []
-    return {"ok": True, "result": data}
 
 
 def _handle_save(brain, args, graph_changes):
@@ -200,3 +181,61 @@ def _handle_drop_sys_revision_history(brain, args, graph_changes):
         'count_found': count,
         'count_deleted': deleted,
     }}
+
+
+def _handle_gate(brain, args, graph_changes):
+    """The brain's run switch (servers/brain_gate.py) — status / pause /
+    resume / ignore / unignore. Writes the user env file, not a brain
+    database: is_write=False at the daemon layer. Every action answers with
+    the resulting status so the caller sees what the file now says and, for
+    each project in args.projects, the gate's verdict for a session there
+    (the dashboard asks for its live sessions' projects; the matcher's `!`
+    include rule stays here, in its owner)."""
+    from .brain_gate import status, set_paused, add_ignore, remove_ignore, verdicts
+    action = (args.get("action") or "status").strip()
+    pattern = args.get("pattern") or ""
+    try:
+        if action == "pause":
+            set_paused(True)
+        elif action == "resume":
+            set_paused(False)
+        elif action == "ignore":
+            add_ignore(pattern)
+        elif action == "unignore":
+            remove_ignore(pattern)
+        elif action != "status":
+            return {"ok": False, "error": "gate: unknown action %r" % action}
+    except (ValueError, OSError) as e:
+        return {"ok": False, "error": "gate: %s" % e}
+    result = status()
+    result["action"] = action
+    projects = args.get("projects")
+    if isinstance(projects, list) and projects:
+        result["verdicts"] = {p: v._asdict()
+                              for p, v in verdicts([str(p) for p in projects]).items()}
+    if action == "pause":
+        result["note"] = ("paused — hooks in every session go silent from their next "
+                          "invocation; this and the other explicit tools keep working")
+    return {"ok": True, "result": result}
+
+
+def _handle_set_api_key(brain, args, graph_changes):
+    """The operator's Anthropic key into the user env file — the dashboard's
+    /setup page posts here, so the daemon is that file's one writer (the gate
+    switches above, this key here). The value is a secret: validated, never
+    logged, never echoed back. The daemon re-reads the file on every
+    LLM-availability check (scales.dispatch.resolve_api_key), so the key is
+    live at the next call with no restart; an existing line is REPLACED —
+    the form is explicit operator intent."""
+    from .brain_constants import user_env_file, write_env_file_key
+    key = (args.get("api_key") or "").strip()
+    if not key.startswith("sk-") or not 10 <= len(key) <= 300:
+        return {"ok": False, "error": "that doesn't look like an Anthropic API key (expected sk-...)"}
+    if any(c.isspace() for c in key):
+        return {"ok": False, "error": "the key contains whitespace — check the paste"}
+    path = user_env_file()
+    try:
+        write_env_file_key(path, "ANTHROPIC_API_KEY", key)
+    except OSError as e:
+        return {"ok": False, "error": "could not write %s: %s" % (path, e.strerror or e)}
+    return {"ok": True, "result": {"key_present": True, "env_file": path}}

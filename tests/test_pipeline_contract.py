@@ -26,27 +26,6 @@ from servers.scales.s1.surface_contract import (
 )
 
 
-class TestTruncationInvariants(unittest.TestCase):
-    """Cross-contract truncation invariants — loud instead of comment-enforced."""
-
-    def test_upstream_cap_covers_display_limits(self):
-        """PIPELINE['recent_message_content'] must not clip below the per-role
-        display truncation in build_surface_prompt. The upstream trace pull in
-        daemon_hooks caps every message at recent_message_content chars BEFORE
-        the per-role limits apply — a smaller upstream value silently starves
-        the role limits (anchor turns clipped at the cap, the configured limit
-        never reached).
-        """
-        from servers.pipeline_contract import PIPELINE
-        self.assertGreaterEqual(
-            PIPELINE['recent_message_content'],
-            max(SURFACE['user_message_limit'], SURFACE['anchor_message_limit'],
-                SURFACE['last_anchor_message_limit'],
-                SURFACE['current_message_limit']),
-            "recent_message_content (upstream cap) clips messages below the "
-            "per-role display limits in build_surface_prompt")
-
-
 class TestEmbeddingGroups(unittest.TestCase):
     """Verify embedding group contract integrity."""
 

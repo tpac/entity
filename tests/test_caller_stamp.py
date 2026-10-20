@@ -7,7 +7,8 @@ rewrites the tool input with `_caller_session` + `_caller_sig`; the proxy
 (brain_mcp._stamp_caller_session) honors a `_caller_session` it did not write
 only when the signature verifies. Locked here: (1) sign/verify and the secret's
 provisioning in servers.dispatch_common, (2) the proxy rule — env wins, then a
-verified stamp, else scrub and note once per reason, (3) the hook end to end:
+verified stamp, else an EMPTY stamp (anonymous, never headless) and a note once
+per reason, (3) the hook end to end:
 its stdout, fed to the proxy, resolves to the same session, and (4) that the
 proxy never forwards the signature. No brain, no daemon; every test signs under
 a throwaway XDG_CONFIG_HOME, never the install's real secret.
@@ -152,7 +153,7 @@ class TestSignVerify(_TmpSecret):
 
 
 class TestProxyRule(_TmpSecret):
-    """brain_mcp._stamp_caller_session: env wins → verified stamp → scrub."""
+    """brain_mcp._stamp_caller_session: env wins → verified stamp → empty stamp."""
 
     def _stamped(self, sid=SID, **extra):
         args = {dc.CALLER_SESSION_KEY: sid, dc.CALLER_SIG_KEY: dc.sign_caller_session(sid)}
@@ -177,7 +178,7 @@ class TestProxyRule(_TmpSecret):
         args = self._stamped(q=1)
         args[dc.CALLER_SIG_KEY] = "0" * 64
         out = brain_mcp._stamp_caller_session(args, note=notes.append)
-        self.assertEqual(out, {"q": 1})
+        self.assertEqual(out, {dc.CALLER_SESSION_KEY: "", "q": 1})
         self.assertEqual(len(notes), 1)
         self.assertIn("a bad signature", notes[0])
 
@@ -188,7 +189,7 @@ class TestProxyRule(_TmpSecret):
         with mock.patch.object(brain_mcp, "verify_caller_session",
                                side_effect=PermissionError("denied")):
             out = brain_mcp._stamp_caller_session(self._stamped(q=1), note=notes.append)
-        self.assertEqual(out, {"q": 1})
+        self.assertEqual(out, {dc.CALLER_SESSION_KEY: "", "q": 1})
         self.assertEqual(len(notes), 1)
         self.assertIn("could not verify", notes[0])
         self.assertIn("PermissionError", notes[0])
@@ -197,19 +198,22 @@ class TestProxyRule(_TmpSecret):
         notes = []
         out = brain_mcp._stamp_caller_session({dc.CALLER_SESSION_KEY: "forged", "q": 1},
                                               note=notes.append)
-        self.assertEqual(out, {"q": 1})
+        self.assertEqual(out, {dc.CALLER_SESSION_KEY: "", "q": 1})
         self.assertEqual(len(notes), 1)
         self.assertIn("no signature", notes[0])
 
-    def test_headless_call_is_noted_and_otherwise_untouched(self):
+    def test_unattributed_call_is_noted_and_stamped_empty(self):
+        # Empty, not absent: an absent key is how the daemon recognizes a
+        # headless hook or poller, which may name itself with session_id.
         notes = []
         out = brain_mcp._stamp_caller_session({"q": 1}, note=notes.append)
-        self.assertEqual(out, {"q": 1})
+        self.assertEqual(out, {dc.CALLER_SESSION_KEY: "", "q": 1})
         self.assertEqual(len(notes), 1)
         self.assertIn("no identity source", notes[0])
 
     def test_without_note_the_rule_is_silent(self):
-        self.assertEqual(brain_mcp._stamp_caller_session({dc.CALLER_SESSION_KEY: "forged"}), {})
+        self.assertEqual(brain_mcp._stamp_caller_session({dc.CALLER_SESSION_KEY: "forged"}),
+                         {dc.CALLER_SESSION_KEY: ""})
 
     def test_session_id_filter_is_never_touched(self):
         # Identity ≠ filter: an explicit caller-supplied session_id survives
@@ -218,7 +222,7 @@ class TestProxyRule(_TmpSecret):
         self.assertEqual(out["session_id"], "other")
         self.assertEqual(out[dc.CALLER_SESSION_KEY], SID)
         out = brain_mcp._stamp_caller_session({"session_id": "other", dc.CALLER_SESSION_KEY: "forged"})
-        self.assertEqual(out, {"session_id": "other"})
+        self.assertEqual(out, {"session_id": "other", dc.CALLER_SESSION_KEY: ""})
 
     def test_identity_gap_is_logged_once_per_reason(self):
         logged = []

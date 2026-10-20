@@ -75,12 +75,16 @@ import numpy as np
 try:
     from .brain_constants import _TITLE_BOOST_STOPWORDS
     from .pipeline_contract import EMBEDDING_GROUPS
-    from .trace_contract import OPERATOR_DIALOGUE_REF_TYPES, is_machine_turn
+    from .trace_contract import (CHAIN_PREFIXES, OPERATOR_DIALOGUE_REF_TYPES,
+                                 row_speaker, row_text, session_short,
+                                 turn_incoming)
     from .scales.s1.trace_links import gather, nodes_for_traces, _stop_of
 except ImportError:                                    # direct-script import shape
     from brain_constants import _TITLE_BOOST_STOPWORDS
     from pipeline_contract import EMBEDDING_GROUPS
-    from trace_contract import OPERATOR_DIALOGUE_REF_TYPES, is_machine_turn
+    from trace_contract import (CHAIN_PREFIXES, OPERATOR_DIALOGUE_REF_TYPES,
+                                row_speaker, row_text, session_short,
+                                turn_incoming)
     from scales.s1.trace_links import gather, nodes_for_traces, _stop_of
 
 # v1 gains + knobs — the measured static composition. Overridable via the interactions
@@ -319,8 +323,10 @@ def roles_for_moments(brain, moments, window_turns, pull_limit, as_of=None):
                     'laf_roles_pull_truncated', None,
                     'session=%s streams=%s hold >%d rows before as_of=%s — '
                     'role join is measuring a clipped window'
-                    % (sess[:8], ','.join(clipped), pull_limit, as_of))
-        targets = [{'id': '%d@%d' % (mi, ws), 'chain_id': 's0-%s-%d' % (short, ws)}
+                    % (session_short(sess), ','.join(clipped), pull_limit, as_of))
+        targets = [{'id': '%d@%d' % (mi, ws),
+                    'chain_id': CHAIN_PREFIXES['s0'].format(session_short=short,
+                                                            stop=ws)}
                    for mi, (short, stop, _s) in enumerate(moms)
                    for ws in range(max(stop - w, 0), stop + w + 1)]
         links = nodes_for_traces(st['surface'], st['encode'], targets,
@@ -855,86 +861,77 @@ class LafV1Engine:
         }
 
     # ── the moment stack: last-K turns as slot lanes (§20.17/§20.18) ──
-    def _moment_stack(self, brain, session_id, K, as_of=None):
+    def _moment_stack(self, brain, session_id, K, as_of=None,
+                      cue_trace_id=None):
         """The session's last-K conversational turns, walker slot semantics:
-        slot j = TURN DISTANCE — turn t−j contributes its operator message as
-        oj and its assistant message as aj; a0 never joins (W3 — at live time
+        slot j = TURN DISTANCE — turn t−j contributes each operator message
+        as an oj entry and its reply as aj; a0 never joins (W3 — at live time
         the response doesn't exist; under as_of the strict < cut excludes it).
 
-        Turns come through the traces-layer door (get_conversation — the same
-        object the S1 encoder reads); machine turns drop their operator side
-        but keep slot occupancy and their assistant side (the shared
-        is_machine_turn — W2, the v6 mislabel lesson); vectors join from the
-        resident trace matrix by trace_id. A turn whose embedding hasn't
-        landed yet joins as vec=None (cosine slots skipped, idf still fires) —
-        ledger-counted, so W1 cache freshness is a measured number, never an
-        assumption.
+        Turns come whole from the turn reader the encoder and the Surface
+        read (brain.conversation_turns, grouped by the one turn rule): a
+        message typed mid-turn is a second oj entry in its opener's slot, and
+        scores() meshes a slot's entries by max. The stack is operator↔Anchor:
+        a turn the harness or another speaker opened keeps its slot and its
+        reply but has no o entry (W2, the v6 mislabel lesson), and their rows
+        riding in a turn are skipped. Vectors join from the resident trace
+        matrix by trace id. A turn whose embedding hasn't landed yet joins as
+        vec=None (cosine slots skipped, idf still fires) — ledger-counted, so
+        W1 cache freshness is a measured number, never an assumption.
 
-        THE LIVE-EDGE RULE: the stack is COMPLETED turns. The user_message
-        trace is written at prompt-arrival (not Stop — see get_session_turns'
-        exclude_trace_id note), so at recall time the CURRENT prompt is
-        already in the conversation; without this rule it would enter as j=1
-        and double-count the j0 query. A trailing answer-less user turn is
-        exactly that in-flight prompt → dropped (ledger 'live_edge_dropped');
-        under replay the as_of strict < cut (get_conversation's older_than —
-        in SQL, so the window is the last turns AT as_of, not the last turns
-        NOW minus the future) removes the cue row before this rule sees it.
+        THE CUT. Live, cue_trace_id is the row that fired this recall: the
+        window ends just before it (the reader's before_trace_id), so the cue
+        never doubles the j0 query, and a message typed mid-turn — or a
+        report arriving mid-turn, whoever sent it — still sees the prompt
+        that opened its turn at o1. Without a cue (replay, and any caller but
+        the prompt hook) the live-edge rule drops a newest turn that has no
+        reply (ledger 'live_edge_dropped'): read live, that is the in-flight
+        prompt; under as_of the strict < cut has already removed the cue row,
+        so it drops only a mid-turn cue's open turn, whole.
 
         Returns ([(side, j, unit_vec_or_None, text)], ledger)."""
         ledger = {'rows': 0, 'turns': 0, 'machine_dropped': 0,
-                  'missing_vec': 0, 'live_edge_dropped': 0}
+                  'correspondent_dropped': 0, 'missing_vec': 0,
+                  'live_edge_dropped': 0}
         try:
-            rows = brain.get_conversation(session_id, limit=4 * K + 8,
-                                          with_judge_output=False,
-                                          older_than=as_of)
+            turns = brain.conversation_turns(
+                session_id, K if cue_trace_id else K + 1,
+                before_trace_id=cue_trace_id, older_than=as_of)
         except Exception as e:
             # Degrading to bare-query recall beats killing the whole field
             # (a scores() failure means no recall at all) — but NEVER
             # silently: logged, and the ledger says the stack is gone.
             brain._log_error('laf_moment_stack', e,
-                             'get_conversation failed — recalling without '
+                             'conversation_turns failed — recalling without '
                              'moment context')
             ledger['error'] = str(e)
             return [], ledger
-        ledger['rows'] = len(rows)
-        turns = []                       # [[op_row_or_None, anchor_row_or_None]]
-        for r in rows:
-            # The moment stack is operator↔Anchor pairs — pinned like the
-            # vector matrix above (_refresh_traces), or a dial-on delivery
-            # row would occupy a vec-less j-slot and displace real turns.
-            # Own ledger key: a correspondent drop removes the ROW, while a
-            # machine drop keeps its j-slot ([None, None]) — different shapes.
-            if r.get('ref_type') and r['ref_type'] not in OPERATOR_DIALOGUE_REF_TYPES:
-                ledger['correspondent_dropped'] = (
-                    ledger.get('correspondent_dropped', 0) + 1)
-                continue
-            role = r.get('role')
-            if role == 'user':
-                if is_machine_turn(r.get('content')):
-                    ledger['machine_dropped'] += 1
-                    turns.append([None, None])   # slot occupied, op side dropped
-                else:
-                    turns.append([r, None])
-            elif role == 'assistant':
-                if turns and turns[-1][1] is None:
-                    turns[-1][1] = r
-                else:
-                    turns.append([None, r])      # orphan assistant (session tails)
-        if turns and turns[-1][1] is None:
+        ledger['rows'] = sum(len(turn_incoming(t)) + bool(t['assistant'])
+                             for t in turns)
+        if not cue_trace_id and turns and turns[-1]['assistant'] is None:
             turns.pop()                          # the live-edge rule (docstring)
             ledger['live_edge_dropped'] = 1
+        turns = turns[-K:]
         stack = []
-        for j, (op, anchor) in enumerate(reversed(turns[-K:]), start=1):
-            for side, r in (('o', op), ('a', anchor)):
-                if r is None:
-                    continue
-                idx = self._tr_ids.get(r.get('trace_id'))
+        for j, t in enumerate(reversed(turns), start=1):
+            entries = []
+            for r in turn_incoming(t):
+                speaker = row_speaker(r)
+                if speaker == 'operator':
+                    entries.append(('o', r))
+                elif speaker == 'harness':
+                    ledger['machine_dropped'] += 1
+                else:
+                    ledger['correspondent_dropped'] += 1
+            if t['assistant']:
+                entries.append(('a', t['assistant']))
+            for side, r in entries:
+                idx = self._tr_ids.get(r.get('id'))
                 vec = self._tr_vec(idx) if idx is not None else None
                 if vec is None:
                     ledger['missing_vec'] += 1
-                stack.append((side, j,
-                              vec, (r.get('content') or '')[:MOMENT_TEXT_CAP]))
-        ledger['turns'] = min(K, len(turns))
+                stack.append((side, j, vec, row_text(r)[:MOMENT_TEXT_CAP]))
+        ledger['turns'] = len(turns)
         return stack, ledger
 
     # ── the scorer ──
@@ -959,7 +956,7 @@ class LafV1Engine:
             return self._n
 
     def scores(self, brain, query, query_vec, model=None, session_project=None,
-               as_of=None, session_id=None):
+               as_of=None, session_id=None, cue_trace_id=None):
         """({node_id: score01}, telemetry) over every node with ≥1 embedding view.
 
         score01 is a monotonic sigmoid of the z-scored gain-weighted field sum,
@@ -983,6 +980,11 @@ class LafV1Engine:
         an empty table → no stack is pulled (the dormant default). The last
         stack's coverage ledger is kept on self._last_moment_ledger (the V2
         moment-mass / W1 freshness instrument).
+
+        cue_trace_id: the trace row that fired this recall (the prompt hook's
+        first incoming row) — the stack's window ends just before it. None
+        (replay, every non-hook caller) → the as_of cut and the live-edge
+        rule (_moment_stack).
         """
         qv = _unit(query_vec)
         if qv is None or not MAXSIM_VIEWS:
@@ -1017,8 +1019,9 @@ class LafV1Engine:
             m_k = int(cfg.get('moment_K') or 0)
             self._last_moment_ledger = None
             if mg and m_k > 0 and session_id:
-                stack, m_ledger = self._moment_stack(brain, session_id, m_k,
-                                                     as_of=as_of)
+                stack, m_ledger = self._moment_stack(
+                    brain, session_id, m_k, as_of=as_of,
+                    cue_trace_id=cue_trace_id)
                 self._last_moment_ledger = m_ledger
                 for side, j, mv, text in stack:
                     if not any('%s_%s%d' % (l, side, j) in mg
@@ -1028,7 +1031,12 @@ class LafV1Engine:
                             text, mv, n, as_of=as_of).items():
                         name = '%s_%s%d' % (lane, side, j)
                         if name in mg:
-                            fields[name] = vec
+                            # a slot with several operator messages (one
+                            # typed mid-turn) keeps the stronger per node;
+                            # fmax, so a message missing a lane (NaN)
+                            # never masks the one that has it
+                            fields[name] = (np.fmax(fields[name], vec)
+                                            if name in fields else vec)
             # THE node-mask chokepoint (§20.11 #1/#6): one masked z-score
             # loop covers every node-indexed lane, including future ones.
             # support-z is lane-gated: only the zero-sea lanes take it —

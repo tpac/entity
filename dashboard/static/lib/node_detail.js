@@ -24,6 +24,7 @@
 import { api } from './api.js';
 import { el, html, mount, localTime, relativeTime } from './dom.js';
 import { SCALE_COLORS } from './scales.js';
+import { sessionShort } from './sessions.js';
 
 // ── Field rendering policy ────────────────────────────────────────────
 // Fields rendered elsewhere (title, content, timestamps, the meta strip)
@@ -260,7 +261,7 @@ function _sourceRefsSection(refs) {
       continue;
     }
     const sc = SCALE_COLORS[ref.scale] || '#666';
-    const sess = ref.session_id ? ref.session_id.substring(0, 8) : '';
+    const sess = sessionShort(ref.session_id);
     const tagText = ref.scale + ' · ' + (ref.event_type || '')
                   + (ref.ref_type ? ' · ' + ref.ref_type : '')
                   + (sess ? ' · ' + sess : '');

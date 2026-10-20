@@ -13,8 +13,11 @@ Sections:
 - Generic door   — query_traces, get_trace, get_traces, count_traces
 - Journal + arc  — journal_notes, write_journal_notes, write_session_arc
 - Episodic       — recall_episodes (decode-over-traces sibling of recall)
-- Conversation   — get_conversation, turns_since_last_encode,
-                   get_conversation_around (context grouped by session)
+- Conversation   — conversation_turns (whole turns: the encoder's and the
+                   Surface's window, the LAF moment stack),
+                   get_conversation (rows), turns_since_last_encode,
+                   last_encode_anchor, get_conversation_around (context
+                   grouped by session)
 
 Traces are the universal record of the whole fractal — S0 exchanges, S1 runs,
 S2 runs — so these are brain-level capabilities: they span every scale, owned
@@ -35,6 +38,7 @@ from .contract import flag_truncation as _flag_truncation
 from .brain_constants import (
     EPISODE_DEFAULT_LIMIT, EPISODE_DEFAULT_WINDOW_DAYS,
     EPISODE_SEMANTIC_CANDIDATE_CAP)
+from .trace_contract import HOST_TURN_FIELD, OPERATOR_DIALOGUE_REF_TYPES, session_short
 
 
 def _resolve_time_bound(value):
@@ -130,7 +134,7 @@ def _s0_trace(brain, ctx, event_type, ref_type, summary, metadata=None,
     apart nor get cut invisibly. The S0 turn events differ only in
     event_type / ref_type / summary / metadata / ref_id; everything else is
     turn-fixed. Routing them all through here keeps session_id from being
-    dropped — the self_message append once omitted it, leaving cross-stream
+    dropped — the self_message append once omitted it, leaving cross-session
     deliveries unattributable to the recipient session.
 
     Callers: the hooks (daemon_hooks) and the delivery leg (channels/
@@ -138,8 +142,19 @@ def _s0_trace(brain, ctx, event_type, ref_type, summary, metadata=None,
     `_s0_trace(...)` as a scale-binding helper; an attribute call would be
     extractor-blind.
 
-    Returns the appended trace_event id (hook_recall passes the current
-    prompt's id to get_session_turns as exclude_trace_id)."""
+    Returns the appended trace_event id (hook_recall ends the Surface's
+    window and the LAF moment stack's just before the current prompt's)."""
+    # Loud at the write boundary: a dialogue row with no text reaches Surface,
+    # the encoder and presence as an empty turn, and nothing downstream can
+    # tell it from a turn that said nothing. Per session in the error text, so
+    # one session's gap never masks another's. Logged, never blocking.
+    if ref_type in OPERATOR_DIALOGUE_REF_TYPES and not (content or '').strip():
+        brain._log_error(
+            's0_dialogue_empty',
+            ValueError('session %s wrote an empty %s'
+                       % (session_short(ctx.session_id), ref_type)),
+            'the turn is recorded with no text — Surface and the encoder '
+            'read it as an empty turn', ctx)
     if content:
         from .pipeline_contract import PIPELINE as _PL
         from .loud_truncation import cap_text_loud
@@ -199,10 +214,14 @@ class BrainTracesMixin:
         - chain_id set: return single chain with all events
         - ref_type set: filter events by ref_type (+ optional ref_id to scope to
           one subject, chain_suffix to scope to one S2 unit's chains, session_id
-          to scope to one session, hours=None to disable the time window)
-        - grouped=True + session_id: return chains grouped with nested events
-          (NOTE: unlike the flat single-session pull, the grouped path IS
-          hours-bound — pass a wide hours for historical sessions)
+          / session_ids to scope to one or several sessions, hours=None to
+          disable the time window)
+        - grouped=True + session_id / session_ids: return chains grouped with
+          nested events (NOTE: unlike the flat session pulls, the grouped path
+          IS hours-bound — pass a wide hours for historical sessions). Grouped
+          with no session scope, or beside a filter whole chains can't apply
+          (ref_type, ref_id, event_type, chain_suffix, exclude_ref_types,
+          older_than), raises ValueError rather than answer with a flat pull.
         - session_ids (list) set: cross-session pull; hours ignored
         - session_id (str) set: single-session pull; hours ignored
         - default: return flat recent events (hours-bound; + optional chain_suffix
@@ -217,6 +236,20 @@ class BrainTracesMixin:
         """
         if chain_id:
             return {'chain': self._trace_dal.get_chain(chain_id)}
+        if grouped:
+            dropped = [name for name, value in (
+                ('ref_type', ref_type), ('ref_id', ref_id),
+                ('event_type', event_type), ('chain_suffix', chain_suffix),
+                ('exclude_ref_types', exclude_ref_types),
+                ('older_than', older_than)) if value]
+            if dropped:
+                raise ValueError(
+                    "grouped=true returns whole chains and can't apply %s — "
+                    "drop grouped or the filter" % ', '.join(dropped))
+            if not (session_id or session_ids):
+                raise ValueError(
+                    "grouped=true needs session_id or session_ids — it loads "
+                    "every row in the window before grouping")
         # Every bounded branch fetches limit+1: an extra row is PROOF the
         # window has more data than the limit returned. Silent saturation is
         # the dangerous case — a limit-clipped result covers a fraction of the
@@ -226,8 +259,8 @@ class BrainTracesMixin:
         if ref_type:
             rows = self._trace_dal.get_by_ref_type(
                 ref_type=ref_type, scale=scale, hours=hours, limit=limit + 1,
-                session_id=session_id, ref_id=ref_id, chain_suffix=chain_suffix,
-                older_than=older_than)
+                session_id=session_id, session_ids=session_ids, ref_id=ref_id,
+                chain_suffix=chain_suffix, older_than=older_than)
             out = _flag_truncation({'events': rows[:limit]}, rows, limit,
                                    key='events')
             # The WINDOW clips as silently as the limit did. This branch
@@ -239,15 +272,20 @@ class BrainTracesMixin:
             # session: 0 rows for one session, 386 of 1,163 for another, in a
             # 2026-08-16 cost audit. Naming the applied window costs one key
             # and makes the clip visible without changing what anyone gets.
-            if hours is not None and (session_id or ref_id):
+            if hours is not None and (session_id or session_ids or ref_id):
                 out['window_hours'] = hours
             return out
-        if grouped and session_id:
+        if grouped:
             chains = self._trace_dal.get_chains(
-                session_id=session_id, scale=scale, hours=hours,
-                limit=limit + 1)
-            return _flag_truncation({'chains': chains[:limit]}, chains, limit,
-                                    key='chains')
+                session_id=session_id, session_ids=session_ids, scale=scale,
+                hours=hours, limit=limit + 1)
+            out = _flag_truncation({'chains': chains[:limit]}, chains, limit,
+                                   key='chains')
+            # Hours-bound like a scoped ref_type pull, and as easy to misread
+            # as the whole session — name the window the same way.
+            if hours is not None:
+                out['window_hours'] = hours
+            return out
         # Single or multi session pulls — both authoritative, both ignore hours.
         # get_recent raises ValueError if both are set; we don't second-guess.
         rows = self._trace_dal.get_recent(
@@ -657,6 +695,51 @@ class BrainTracesMixin:
             self._trace_dal.append_batch(events)
         return len(events)
 
+    def write_tool_moment(self, *, chain_id, session_id, cue, shown,
+                          agent_id=''):
+        """Write door for the tool moment — one `tool_shown` K row on the turn's
+        recall chain (trace_contract.REF_TOOL_SHOWN): ref_id is the JSON list
+        of 8-char ids shown, `selected` their 'id8|title' lines, plus the `cue`
+        and the `agent_id` ('' = the session's own agent). Its one reader is
+        the tool moment itself — which cues an agent already recalled and what
+        it showed. Written when nothing was shown too, so an empty recall is not
+        repeated.
+
+        `shown` is [(node_id, title)]. Failure-isolated: the inject already
+        reached the agent; a lost row is logged loud and only costs a later
+        repeat."""
+        try:
+            from .trace_contract import (REF_TOOL_SHOWN, TOOL_AGENT_FIELD,
+                                          TOOL_CUE_FIELD)
+            ids = [str(nid)[:8] for nid, _ in shown]
+            return self._trace_dal.append(
+                chain_id=chain_id, scale='s1', event_type='K',
+                ref_type=REF_TOOL_SHOWN, ref_id=json.dumps(ids),
+                summary='%d shown at %s' % (len(ids), cue[:100]),
+                metadata={
+                    'selected': ['%s|%s' % (str(nid)[:8], title or '')
+                                 for nid, title in shown],
+                    TOOL_CUE_FIELD: cue,
+                    TOOL_AGENT_FIELD: agent_id or '',
+                },
+                session_id=session_id)
+        except Exception as e:
+            self._log_error('tool_moment_trace_failed', e,
+                            'chain=%s cue=%s' % (chain_id, cue[:80]))
+            return None
+
+    def tool_moment_rows(self, session_id, agent_id=''):
+        """What the tool moment already did for one agent of a session:
+        [{'cue', 'ids'}] (dal_logs.get_tool_moment_rows). A failed read is
+        logged and returns [] — the moment then recalls again rather than
+        going silent."""
+        try:
+            return self._trace_dal.get_tool_moment_rows(session_id, agent_id)
+        except Exception as e:
+            self._log_error('tool_moment_rows', e,
+                            'session=%s' % session_short(session_id))
+            return []
+
     def write_thalamus_filed(self, *, chain_id, session_id, item_id, source,
                              body, target_session='', needs_answer=False,
                              dedup_key='', route='queue', filing='new'):
@@ -728,12 +811,12 @@ class BrainTracesMixin:
                     self._log_warning(
                         'session_arc_no_arc_extracted',
                         'session=%s: %r present but no parseable fenced block'
-                        % (session_id[:8], JOURNAL_ARC_MARKER))
+                        % (session_short(session_id), JOURNAL_ARC_MARKER))
                     return {'written': False, 'status': 'no_arc_extracted'}
                 self._log_warning(
                     'session_arc_no_arc_section',
                     'session=%s: encoder final_text (%d chars) has no %r section'
-                    % (session_id[:8], len(final_text or ''), JOURNAL_ARC_MARKER))
+                    % (session_short(session_id), len(final_text or ''), JOURNAL_ARC_MARKER))
                 return {'written': False, 'status': 'no_arc_section'}
             if block == '':
                 self.log_debug('session_arc_empty', 'write_session_arc',
@@ -754,7 +837,7 @@ class BrainTracesMixin:
             return {'written': True, 'status': 'ok'}
         except Exception as e:
             self._log_error('session_arc_write_failed', e,
-                            'session=%s' % (session_id or '')[:8])
+                            'session=%s' % session_short(session_id))
             return {'written': False, 'status': 'error'}
 
     # ── Episodic recall ──
@@ -913,20 +996,31 @@ class BrainTracesMixin:
                          include_timestamp_ties: bool = False) -> List[Dict]:
         """Get conversation turns within one required session.
 
-        The simple path — S1E, scribe_due, the surface window, the LAF
-        moment stack: anything that knows its session_id and wants the last
-        N turns. A centered window uses the same reader and row contract;
-        get_conversation_around resolves a memory's anchors before calling it.
-        A timestamp positions the window; it never selects a session.
+        The simple path — the scribe_due poll, anything that knows its
+        session_id and wants its last N rows (whole turns come from
+        conversation_turns). A centered window uses the same reader and row
+        contract; get_conversation_around resolves a memory's anchors before
+        calling it. A timestamp positions the window; it never selects a
+        session.
 
-        Returns: [{role, ref_type, content, timestamp, trace_id, judge_output}]
+        Returns: [{role, ref_type, content, timestamp, trace_id, chain_id,
+                  host_turn, judge_output}]
             ref_type: the CORRESPONDENT axis (user_message = operator,
-                      self_message = a stream, thalamus_delivery = the brain)
+                      env_message = the harness, subagent_message = a
+                      subagent, self_message = a session, thalamus_delivery =
+                      the brain — trace_contract.INCOMING_SPEAKERS)
                       passed through from get_session_turns — the encoder's
                       render keys speaker elements on it.
             trace_id: 8-char hex id from trace_events (v29) — rendered as the
                       `trace="…"` attribute on the S1 encoder's timeline turns,
                       which it copies into source_refs.
+            chain_id: the row's s0 chain — the encoder's window count reads
+                      it to tell a delivery that arrived with an open turn
+                      from one that opens its own.
+            host_turn: on an incoming row, the host's name for the turn it
+                      arrived in ('' when unstamped) — the turn rule
+                      (trace_contract.joins_open_turn) reads it to join a
+                      message absorbed mid-turn to the turn it arrived in.
             judge_output: surface selection from S1R for the user turn (if any).
                       Filling it costs an extra query over the window's recall
                       chains — callers that only read role/content (the
@@ -960,6 +1054,8 @@ class BrainTracesMixin:
                 row = {'role': t['role'],
                        'ref_type': t.get('ref_type', ''),
                        'trace_id': t.get('trace_id'),
+                       'chain_id': t.get('chain_id'),
+                       HOST_TURN_FIELD: t.get(HOST_TURN_FIELD, ''),
                        'content': t.get('content', ''),
                        'timestamp': t.get('timestamp', ''),
                        'judge_output': t.get('judge_output', '')}
@@ -968,11 +1064,101 @@ class BrainTracesMixin:
                 out.append(row)
             return out
         except Exception as e:
-            # Empty-list degrade keeps every consumer alive (Scribe cadence,
-            # surface window, moment stack) — but never silently.
+            # Empty-list degrade keeps every consumer alive (the Scribe
+            # cadence poll, the centered window) — but never silently.
             self._log_error('get_conversation', e,
-                            'session=%s' % (session_id or '')[:8])
+                            'session=%s' % session_short(session_id))
             return []
+
+    def conversation_turns(self, session_id: str, n_turns: int, *,
+                           with_actions: bool = False,
+                           with_surfaced: bool = False,
+                           with_judge_output: bool = False,
+                           before_trace_id: str = None,
+                           older_than: str = None) -> List[Dict]:
+        """The last `n_turns` whole turns of one session's conversation —
+        the reader the encoder timeline, the Surface window and the LAF
+        moment stack share, so the grouping (trace_contract.group_turns, by
+        joins_open_turn) happens once and a window can never cut a turn.
+
+        Returns [{'user', 'with', 'assistant', 'actions'}] oldest first
+        (group_turns' shape). Rows are trace records as stored (id, ref_type,
+        summary, metadata, created_at, chain_id, …); a render reads a row's
+        text through trace_contract.row_text. Incoming rows carry `surfaced`
+        ([{id, title}]) with with_surfaced and `judge_output` with
+        with_judge_output, from their recall chain
+        (TraceDAL.recall_chain_selections).
+
+        with_actions adds each turn's tool_result rows, read apart from the
+        grouping page (a turn with hundreds of them would push its own prompt
+        out of that page) for the window's span, the newest
+        TURN_READ_MAX_ROWS of them; past that the oldest turns carry fewer
+        actions, never fewer turns. before_trace_id ends
+        the window just before that row — previous turns only, as of the
+        prompt that row opened: its own pieces (the status note riding with
+        it) never form a turn, and a message absorbed mid-turn still sees the
+        turn it joined. older_than is the replay as-of cut (strict
+        created_at <); both together keep the earlier bound.
+
+        Reads the conversational rows newest-first through the
+        recall_episodes door in pages (trace_contract.TURN_READ_ROWS_PER_TURN
+        / TURN_READ_MAX_ROWS). A page that did not reach the session's first
+        row may have cut its oldest turn, so that group is dropped and the
+        page grows.
+        Raises on a read failure — each consumer owns its degrade.
+        """
+        from .trace_contract import (CONVERSATIONAL_REF_TYPES, INCOMING_SPEAKERS,
+                                     TURN_READ_MAX_ROWS, TURN_READ_ROWS_PER_TURN,
+                                     group_turns, turn_incoming, turn_opened_at)
+        if not session_id:
+            raise ValueError('conversation_turns requires a session_id')
+        if n_turns < 1:
+            return []
+        bound = older_than or None
+        if before_trace_id:
+            anchor = self._trace_dal.get_by_ids([before_trace_id])
+            if anchor:
+                at = anchor[0]['created_at']
+                bound = min(bound, at) if bound else at
+        by_time = lambda e: e.get('created_at') or ''   # noqa: E731
+        page = min(TURN_READ_MAX_ROWS, TURN_READ_ROWS_PER_TURN * n_turns)
+        while True:
+            got = self.recall_episodes(
+                session_id=session_id, ref_type=list(CONVERSATIONAL_REF_TYPES),
+                older_than=bound, sort_order='desc', limit=page)
+            truncated = bool(got['truncated'])
+            # The page comes newest-first; turns read oldest-first.
+            turns = group_turns(sorted(got['episodes'], key=by_time))
+            if truncated and turns:
+                turns = turns[1:]
+            if not truncated or len(turns) >= n_turns or page >= TURN_READ_MAX_ROWS:
+                break
+            page = min(page * 2, TURN_READ_MAX_ROWS)
+        turns = turns[-n_turns:]
+        if with_actions and turns:
+            tools = self.recall_episodes(
+                session_id=session_id, ref_type=['tool_result'],
+                younger_than=turn_opened_at(turns[0]), older_than=bound,
+                sort_order='desc', limit=TURN_READ_MAX_ROWS)['episodes']
+            rows = [r for t in turns for r in turn_incoming(t)
+                    + ([t['assistant']] if t['assistant'] else [])]
+            turns = group_turns(sorted(rows + tools, key=by_time))
+
+        incoming = [r for t in turns for r in turn_incoming(t)]
+        if with_surfaced or with_judge_output:
+            chains = {(r.get('metadata') or {}).get('recall_chain') for r in incoming}
+            judge, surfaced = self._trace_dal.recall_chain_selections(
+                chains, with_judge_output=with_judge_output,
+                with_surfaced=with_surfaced)
+            for r in incoming:
+                if r.get('ref_type') not in INCOMING_SPEAKERS:
+                    continue
+                rc = (r.get('metadata') or {}).get('recall_chain') or ''
+                if with_judge_output:
+                    r['judge_output'] = judge.get(rc, '')
+                if with_surfaced:
+                    r['surfaced'] = surfaced.get(rc, [])
+        return turns
 
     def turns_since_last_encode(self, session_id: str) -> int:
         """Conversational turns this session has had since its last S1 encode.
@@ -998,35 +1184,45 @@ class BrainTracesMixin:
         """
         if not session_id:
             return 0
+        return self._trace_dal.conversational_turns_since(
+            session_id, self.last_encode_anchor(session_id))
+
+    def last_encode_anchor(self, session_id: str, older_than: str = None) -> str:
+        """When this session's last successful S1 encode started — the
+        instant everything after it counts as unencoded: the Scribe cadence
+        (turns_since_last_encode) and the encoder's window (encode._window)
+        both count from it, so the two cannot disagree. '' when the session
+        has no successful encode yet.
+
+        A run's start = the LAST encoding_prompt in the chain of its
+        encoding_run delta (a failed attempt retried at the same stop shares
+        the chain and writes an earlier prompt; ASC + [-1] anchors on the
+        successful attempt's own start). ref_type-bounded chain pull: 1-2 rows
+        decoded on the scribe poll, vs the old newest-50 scan whose Python
+        chain match silently fell back to the run's END time past 50 retries
+        (2026-08-07 review, findings 5+7). A run whose chain holds no prompt
+        anchors on the run row itself. older_than: as of that instant (a
+        replay), the last run that finished before it."""
         last = self._trace_dal.get_by_ref_type(
             'encoding_run', scale='s1', session_id=session_id,
-            hours=None, limit=1)
-        since = ''
-        if last:
-            # The run's start = the LAST encoding_prompt in its chain (a
-            # failed attempt retried at the same stop shares the chain and
-            # writes an earlier prompt; ASC + [-1] anchors on the successful
-            # attempt's own start). ref_type-bounded chain pull: 1-2 rows
-            # decoded on the scribe poll, vs the old newest-50 scan whose
-            # Python chain match silently fell back to the run's END time
-            # past 50 retries (2026-08-07 review, findings 5+7).
-            chain = last[0].get('chain_id') or ''
-            prompts = (self._trace_dal.get_chain(
-                chain, ref_type='encoding_prompt') if chain else [])
-            since = (prompts[-1]['created_at'] if prompts
-                     else last[0]['created_at'])
-        return self._trace_dal.conversational_turns_since(session_id, since)
+            hours=None, limit=1, older_than=older_than or '')
+        if not last:
+            return ''
+        chain = last[0].get('chain_id') or ''
+        prompts = (self._trace_dal.get_chain(
+            chain, ref_type='encoding_prompt') if chain else [])
+        return prompts[-1]['created_at'] if prompts else last[0]['created_at']
 
     # ── Presence (self-channel liveness reads over S0 traces) ──
 
-    def present_streams(self, exclude_session: str = '',
+    def present_sessions(self, exclude_session: str = '',
                         window_min: float = 30, limit: int = 5,
                         sort_by: str = 'recency') -> list:
-        """Streams of thought awake RIGHT NOW — the self-channel presence roster.
+        """Sessions awake RIGHT NOW — the self-channel presence roster.
 
         Distinct from `live_sessions()`: that one is "recent meaningful work"
         (≥min_messages, survives week-long gaps, for the Frame's cross-session
-        slots). `present_streams` is WALL-CLOCK "who is awake this moment" —
+        slots). `present_sessions` is WALL-CLOCK "who is awake this moment" —
         sessions whose session_state row updated within the last `window_min`
         minutes, newest first, excluding the caller.
 
@@ -1041,7 +1237,7 @@ class BrainTracesMixin:
 
         Returns [{'session_id': str, 'live_recency': iso, 'focus': str}], newest
         first. `live_recency` is the PRESENCE_LIVE_REF_TYPES clock — heartbeats
-        INCLUDED, so it answers "can this stream be reached", never "has it gone
+        INCLUDED, so it answers "can this session be reached", never "has it gone
         quiet". The name is deliberate on both halves: not `updated_at` (a
         session_state column this value is not), and not `last_turn` (the contract
         says a wakeup re-arm is never a turn, yet this counts one). Its sibling
@@ -1061,7 +1257,7 @@ class BrainTracesMixin:
                     for r in rows]
         except Exception as e:
             try:
-                self._log_error('present_streams_query', e,
+                self._log_error('present_sessions_query', e,
                                 'window_min=%s limit=%d' % (window_min, limit))
             except Exception:
                 pass
@@ -1070,7 +1266,7 @@ class BrainTracesMixin:
     def session_activity(self, session_id: str, msg_limit: int = 2) -> dict:
         """Per-session activity snapshot for self_peek — first/last turn and the
         last conversational messages, from real S0 traces (TraceDAL). Mirrors
-        present_streams (wall-clock, presence-adjacent, read-only). Returns {} on
+        present_sessions (wall-clock, presence-adjacent, read-only). Returns {} on
         error so a peek degrades gracefully rather than raising."""
         if not session_id:
             return {}
@@ -1080,10 +1276,16 @@ class BrainTracesMixin:
         except Exception as e:
             try:
                 self._log_error('session_activity_query', e,
-                                'session=%s' % (session_id or '')[:8])
+                                'session=%s' % session_short(session_id))
             except Exception:
                 pass
             return {}
+
+    def trace_session_ids(self) -> list:
+        """Every session that has traces — the pool a session-scoped trace
+        filter resolves a short against (signal.resolve_session's history pool),
+        where present_sessions is the pool for addressing a live session."""
+        return self._trace_dal.session_ids()
 
     def get_conversation_around(self, node_id: str = None,
                                 session_id: str = None,

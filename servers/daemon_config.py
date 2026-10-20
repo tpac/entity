@@ -10,7 +10,8 @@ import sys
 import time
 import hashlib
 
-from servers.brain_constants import user_config_dir
+from servers.brain_constants import (user_config_dir, user_env_file, brain_tmp_dir,  # noqa: F401 — brain_tmp_dir re-exported
+                                     read_env_file_key as _read_env_file_key)
 
 # ─── Force CPU-only BEFORE any downstream import ───
 # On macOS Apple Silicon, CoreML/Metal XPC connections cause SIGABRT in
@@ -186,64 +187,38 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # predates `source_dir` reporting; the exact signal is the source_dir comparison.
 _IS_WORKTREE = _is_worktree_checkout(REPO_ROOT)
 
+# ─── Build identity ───
+# Hooks and the MCP proxy write a stamp beside cmd/args — their role, their
+# copy's _CODE_FINGERPRINT and REPO_ROOT (daemon_client.send_command `role=`) —
+# so the daemon can tell when an installed copy runs different code from its
+# own (dispatch_common.check_client_code). Dev scripts, evals and the CLI send
+# none and are never checked.
+CLIENT_STAMP_KEY = "client"
+CLIENT_ROLE_HOOK = "hook"
+CLIENT_ROLE_MCP = "mcp"
+# A dev tool that sends hook commands (scripts/stress_recall.py): stamped so
+# the check knows it is not an installed copy, and never judged.
+CLIENT_ROLE_DEV = "dev"
+# A copy is reported only this long after the daemon first saw it: a redeploy
+# updates copies one after another (the plugin tree, the daemon, the Codex
+# cache), so a copy still calling with other code after this is stale.
+STALE_CLIENT_GRACE_S = 120
+# A stale hook copy's notice reaches every session once; it expires this long
+# after its last refresh, and refreshes at most this often while the copy keeps
+# calling (an identical repeat only extends the window — thalamus.file).
+STALE_CLIENT_NOTICE_EXPIRES = "12h"
+STALE_CLIENT_NOTICE_REFRESH_S = 3600
+
 
 # ─── Path Helpers ───
 
-def brain_tmp_dir() -> str:
-    """Root dir for brain's ephemeral cross-process files — the current-stop
-    marker hook_recall writes for the PostToolUse hook. Honors BRAIN_TMP_DIR,
-    defaults to /tmp.
-
-    Production leaves BRAIN_TMP_DIR unset → /tmp. The seam is wired on BOTH
-    sides: the daemon WRITES via this helper, and the out-of-process reader
-    (hooks/scripts/post_tool_trace.py) honors the same env protocol. It is
-    deliberately servers-decoupled, so it reads
-    os.environ.get('BRAIN_TMP_DIR', '/tmp') directly rather than import this —
-    keep it in sync if the default ever changes.
-
-    BrainTestBase + IsolatedBrain set it to a per-test/run temp dir so two
-    concurrent test processes don't collide on fixed filenames (hardcoded
-    session_ids) and the files are cleaned up with the temp dir instead of
-    leaking into /tmp.
-
-    Eval harnesses set it the same way, to each item's brain dir alongside
-    BRAIN_DB_DIR, so concurrent runs never share a current-stop marker (grep
-    'BRAIN_TMP_DIR' across eval/ for the setters).
-
-    NOT for the daemon DISCOVERY paths (pid/lock/status/maintenance) —
-    those are the well-known uid-keyed rendezvous hooks and the statusline must
-    find, and stay at /tmp regardless. NOT for user-facing post-mortem artifacts
-    (get_mcp_crash_path) — those want a findable, uid-keyed location too.
-    """
-    return os.environ.get('BRAIN_TMP_DIR', '/tmp')
-
-
-def _read_env_file_key(path: str, key: str):
-    """Read one KEY=value from a config file that shell consumers SOURCE —
-    so tolerate the shell grammar the same file is written in: optional
-    `export `, single/double quotes, inline comments on unquoted values,
-    $VAR expansion. resolved.env writes values single-quoted. Returns None
-    if absent/unreadable — the two readers of one file must not disagree
-    on its grammar (that's the split-brain class D-13 kills)."""
-    try:
-        with open(path, errors='replace') as f:
-            for raw in f:
-                line = raw.strip()
-                if line.startswith('export '):
-                    line = line[len('export '):].lstrip()
-                if not line.startswith(key + '='):
-                    continue
-                v = line.split('=', 1)[1].strip()
-                if v[:1] in ('"', "'"):
-                    end = v.find(v[0], 1)
-                    v = v[1:end] if end > 0 else v[1:]
-                else:
-                    v = v.split(' #', 1)[0].rstrip()
-                if v:
-                    return os.path.expanduser(os.path.expandvars(v))
-    except OSError:
-        pass
-    return None
+# brain_tmp_dir() — the per-session rendezvous root — lives in
+# brain_constants (a hook-reachable leaf; the gate reads it too) and is
+# imported above. NOT for the daemon DISCOVERY paths (pid/lock/status/
+# maintenance): those are the well-known uid-keyed rendezvous hooks and the
+# statusline must find, and stay at /tmp regardless. NOT for user-facing
+# post-mortem artifacts (get_mcp_crash_path) — those want a findable,
+# uid-keyed location too.
 
 
 def _resolve_daemon_port() -> int:
@@ -255,10 +230,8 @@ def _resolve_daemon_port() -> int:
     launched through brain-env.sh (the MCP server — CC spawns it with a bare
     env), then to the uid formula. A malformed value warns and uses the
     formula instead of crash-looping the daemon under KeepAlive."""
-    xdg = user_config_dir()
     raw = (os.environ.get("BRAIN_DAEMON_PORT")
-           or _read_env_file_key(os.path.join(xdg, 'brain', 'env'),
-                                 'BRAIN_DAEMON_PORT'))
+           or _read_env_file_key(user_env_file(), 'BRAIN_DAEMON_PORT'))
     if raw:
         try:
             return int(raw)
@@ -311,9 +284,7 @@ def _validate_instance_env() -> None:
     # formula when the var is unset, so every shell-launched process arrives
     # here with production's port already "set". Refuse production's VALUE —
     # the formula and the user env file are the two sources production reads.
-    xdg = user_config_dir()
-    prod_port = (_read_env_file_key(os.path.join(xdg, 'brain', 'env'),
-                                    'BRAIN_DAEMON_PORT')
+    prod_port = (_read_env_file_key(user_env_file(), 'BRAIN_DAEMON_PORT')
                  or str(47200 + (os.getuid() % 100)))
     if os.environ["BRAIN_DAEMON_PORT"].strip() == prod_port.strip():
         raise SystemExit(
@@ -362,7 +333,7 @@ def resolve_db_dir(trust_env: bool = True) -> str:
     if d and trust_env:
         return d
     xdg = user_config_dir()
-    cfg = _read_env_file_key(os.path.join(xdg, 'brain', 'env'), 'BRAIN_DB_DIR')
+    cfg = _read_env_file_key(user_env_file(), 'BRAIN_DB_DIR')
     if cfg and os.path.isfile(os.path.join(cfg, 'brain.db')):
         return cfg
     rec = _read_env_file_key(

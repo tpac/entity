@@ -4,8 +4,8 @@ This file holds construction and DAL wiring, the singleton registry, session
 and scope context, interaction prompt/config resolution, configuration,
 maintenance and S2 gating, error and event logging, LLM availability,
 embedder configuration, and save/close. Recall, traces, remember, connections,
-reminders, assembly and corrections come from the mixins the class inherits,
-each in its own brain_*.py file.
+assembly and corrections come from the mixins the class inherits, each in its
+own brain_*.py file.
 
 Storage: sqlite3 (WAL mode, FK on; see db_backends/sqlite.py). Embeddings are
 written off the request path by the embed_queue worker.
@@ -25,13 +25,13 @@ from typing import Dict, List, Optional, Any
 from .schema import ensure_schema, ensure_logs_schema, migrate_logs_to_separate_db
 from .dal import BrainMetaDAL
 from .dal_logs import LOG_SWEEP_SAMPLES, LogsDAL
+from .trace_contract import CHAIN_PREFIXES, session_short
 from .db_backends.sqlite import commit_unless_batched
 from .clock import iso_cutoff, iso_now
 from .brain_recall import BrainRecallMixin
 from .brain_traces import BrainTracesMixin
 from .brain_remember import BrainRememberMixin
 from .brain_connections import BrainConnectionsMixin
-from .brain_reminders import BrainRemindersMixin
 from .brain_assembly import BrainAssemblyMixin
 from .brain_corrections import BrainCorrectionsMixin
 from . import embedder
@@ -47,7 +47,6 @@ class Brain(
     BrainTracesMixin,
     BrainRememberMixin,
     BrainConnectionsMixin,
-    BrainRemindersMixin,
     BrainAssemblyMixin,
     BrainCorrectionsMixin,
 ):
@@ -602,6 +601,16 @@ class Brain(
         from .daemon_config import get_operator_name
         return get_operator_name() or ''
 
+    def speaker_for(self, session_id: str, ref_type: str) -> str:
+        """The name of whoever spoke an incoming row of `ref_type`, '' when
+        none is known — the ONE site renderers ask (the identity stamp on a
+        row is install-wide, so it cannot say who spoke). The operator's rows
+        carry the session's counterpart; the other speakers carry no name."""
+        from .trace_contract import INCOMING_SPEAKERS
+        if INCOMING_SPEAKERS.get(ref_type) == 'operator':
+            return self.counterpart_for(session_id)
+        return ''
+
     def _scope_value(self, dim: str, session_id: str) -> str:
         """Session-side value of one scope dimension ('' when none). The one
         dimension→resolver mapping both scope forms below share."""
@@ -640,16 +649,37 @@ class Brain(
 
     def session_env_for(self, session_id: str) -> dict:
         """Per-session env (cwd, branch, worktree, project, model, host) for a
-        stream — fed in from the host side (boot hook; per-turn recall/Stop hooks
-        for model/host), surfaced in peek so streams identify where each other
+        session — fed in from the host side (boot hook; per-turn recall/Stop hooks
+        for model/host), surfaced in peek so sessions identify where each other
         work and what they ride on. Reads the live cached SessionContext if
         present, else the persisted row. Empty strings when unknown. Mirrors
         session_context_for's per-session pattern (no global key — parallel
         sessions don't clobber)."""
         _empty = {'cwd': '', 'branch': '', 'worktree': '', 'project': '',
                   'model': '', 'host': ''}
-        if not session_id:
+        ctx = self._peek_session_context(session_id, 'session_env_for')
+        if ctx is None:
             return _empty
+        return {'cwd': ctx.cwd, 'branch': ctx.branch, 'worktree': ctx.worktree,
+                'project': ctx.project, 'model': ctx.model, 'host': ctx.host}
+
+    def s0_chain_for(self, session_id: str) -> str:
+        """The S0 chain a row for this session belongs to now: the one its
+        SessionContext names (ctx.s0_chain(), which its prompt and reply rows
+        use), read without creating session state. A session not seen yet, or
+        no session, is at stop 0."""
+        ctx = self._peek_session_context(session_id, 's0_chain_for')
+        if ctx is not None:
+            return ctx.s0_chain()
+        return CHAIN_PREFIXES['s0'].format(
+            session_short=session_short(session_id), stop=0)
+
+    def _peek_session_context(self, session_id: str, reader: str):
+        """The session's live cached SessionContext, else its persisted row,
+        else None. Never creates one. `reader` names the caller in the error
+        row a corrupt persisted row leaves."""
+        if not session_id:
+            return None
         ctx = self._session_contexts.get(session_id)
         if ctx is None:
             from .session_context import SessionContext, SessionContextCorrupt
@@ -657,12 +687,9 @@ class Brain(
                 ctx = SessionContext.load(self._session_state, session_id)
             except SessionContextCorrupt as e:
                 self._log_error('session_context_load', e,
-                                'session_env_for session=%s' % (session_id or '')[:8])
+                                'session=%s %s' % (session_short(session_id), reader))
                 ctx = None
-        if ctx is None:
-            return _empty
-        return {'cwd': ctx.cwd, 'branch': ctx.branch, 'worktree': ctx.worktree,
-                'project': ctx.project, 'model': ctx.model, 'host': ctx.host}
+        return ctx
 
     def _resolve_interaction(self, name: str):
         """Resolve `name` to its effective K: (template, config, row, shadows).
@@ -898,8 +925,8 @@ class Brain(
 
         Single entry point for session state. Hooks send session_id from
         Claude Code args. The brain holds the state. An empty session_id
-        raises: session state belongs to one stream, and there is no other
-        stream's state to substitute for it.
+        raises: session state belongs to one session, and there is no other
+        session's state to substitute for it.
 
         In-memory cache (2026-05-17): SessionContext instances are cached
         on `self._session_contexts` and returned by reference. Mutations
@@ -943,7 +970,7 @@ class Brain(
                 ctx = SessionContext.load(self._session_state, session_id)
             except SessionContextCorrupt as e:
                 self._log_error('session_context_load', e,
-                                'get_or_create_session session=%s' % (session_id or '')[:8])
+                                'get_or_create_session session=%s' % session_short(session_id))
                 ctx = None
             if ctx is None:
                 ctx = SessionContext(session_id=session_id)
@@ -987,7 +1014,7 @@ class Brain(
         single-flight lock + the per-session retry cooldown, this method only
         DECIDES.
 
-        Reads only higher session functions — `present_streams` (who's awake +
+        Reads only higher session functions — `present_sessions` (who's awake +
         each one's last-turn time), `turns_since_last_encode` (per-session
         cadence count) and `get_conversation` (is the newest exchange
         complete?) — never SQL/DAL directly. Wall-clock is correct here
@@ -1030,14 +1057,14 @@ class Brain(
         eval_since = self.eval_brain_since()
         best = None  # (turns, session_id, counter) — highest turns = most overdue
 
-        for stream in self.present_streams(
+        for session in self.present_sessions(
                 window_min=SCRIBE_CANDIDATE_WINDOW_MIN, limit=50):
-            sid = stream.get('session_id', '')
+            sid = session.get('session_id', '')
             if not sid or sid in skip:
                 continue
             try:
                 last_turn = _datetime.fromisoformat(
-                    stream.get('live_recency', '')).timestamp()
+                    session.get('live_recency', '')).timestamp()
             except (ValueError, TypeError):
                 # An eval brain can't tell whose this session is, so it isn't
                 # the eval's to pay for.
@@ -1093,7 +1120,7 @@ class Brain(
                     last[0].get('ref_type') == 'assistant_message')
             # On an eval brain time alone starts no encode: its idle tail
             # waits for scribe_flush.
-            tail = (turns > SCRIBE_TAIL_MIN_TURNS and idle > SCRIBE_TAIL_IDLE_SECONDS
+            tail = (turns >= SCRIBE_TAIL_MIN_TURNS and idle > SCRIBE_TAIL_IDLE_SECONDS
                     and (flush or eval_since is None))
             if not (five_plus or tail):
                 continue
@@ -1107,12 +1134,12 @@ class Brain(
         return None
 
     def stamp_boot_liveness(self, session_id: str) -> None:
-        """Write ONE S0 heartbeat trace at boot so a freshly-booted stream is
+        """Write ONE S0 heartbeat trace at boot so a freshly-booted session is
         visible in presence IMMEDIATELY — before it takes its first turn.
 
-        present_streams reads real-turn S0 traces, so without a boot trace a
-        stream is invisible until its first hook_recall/Stop — which is exactly
-        why two just-booted streams can't find each other at boot (the
+        present_sessions reads real-turn S0 traces, so without a boot trace a
+        session is invisible until its first hook_recall/Stop — which is exactly
+        why two just-booted sessions can't find each other at boot (the
         rendezvous gap, 2026-06-06). 'heartbeat' is already counted by
         active_sessions_by_turn, so the read side is unchanged. Loud on failure,
         never blocks boot."""
@@ -1123,11 +1150,11 @@ class Brain(
             self._trace_dal.append(
                 chain_id=ctx.s0_chain(), scale='s0', event_type='K',
                 ref_type='heartbeat', session_id=session_id,
-                summary='boot — stream online')
+                summary='boot — session online')
         except Exception as e:
             try:
                 self._log_error('stamp_boot_liveness', e,
-                                'session=%s' % (session_id or '')[:8])
+                                'session=%s' % session_short(session_id))
             except Exception:
                 pass
 
@@ -1155,7 +1182,7 @@ class Brain(
         empty means never booted), NOT a global brain_meta flag. The old design
         let the boot hook gate resume-detection on the global `last_booted_session`
         key, which is last-writer-wins across parallel sessions: with concurrent
-        streams every session but the most-recent booter failed the guard, so its
+        sessions every session but the most-recent booter failed the guard, so its
         re-boot (resume / host-wake / compaction) fell through to a full reset.
         That reset wiped the session's accumulated state — back then the S1
         Scribe's cadence was a stored counter, so it got zeroed and the Scribe
@@ -1164,7 +1191,7 @@ class Brain(
         duplicate chain IDs), fatigue, and node_activity.
 
         An empty session_id raises, as in get_or_create_session: a boot that
-        names no session has no stream to boot.
+        names no session has nothing to boot.
         """
         if not session_id:
             raise ValueError('reset_session_activity needs a session_id')
@@ -1192,7 +1219,7 @@ class Brain(
                     existing = SessionContext.load(self._session_state, sid)
                 except SessionContextCorrupt as e:
                     self._log_error('session_context_load', e,
-                                    'reset_session_activity session=%s' % (sid or '')[:8])
+                                    'reset_session_activity session=%s' % session_short(sid))
                     existing = None
             is_resume = existing is not None and bool(existing.boot_time)
             if is_resume:
@@ -1209,7 +1236,7 @@ class Brain(
             # classify as a days-old delivery's reaction.
             ctx.last_delivery_stop = -1
             ctx.last_delivery_armed_at = ''
-            # cwd/branch/worktree are session IDENTITY (where this stream works),
+            # cwd/branch/worktree are session IDENTITY (where this session works),
             # fed in from the boot hook and stamped through the session object's
             # single env mutator. Surfaced via session_env_for / peek.
             if cwd:
@@ -1893,10 +1920,11 @@ class Brain(
         `_compose_enriched_edge_text` in surface_contract.py and the
         `embedding` column on `edge_relations`.
 
-        Note: cache_control / prompt-caching warmup is NOT here. The
-        surface system block is ~2390 tokens, below Haiku 4.5's 4096-token
-        minimum cacheable prefix. A cache warmup call would silently
-        no-op. If the surface prefix grows past 4096, add it back.
+        Note: no prompt-cache warmup here. The surface's tools+system
+        prefix (~3.3k tokens) sits above SURFACE_MODEL's cache floor
+        (CACHE_MIN_PREFIX_TOKENS), so the first real surface call writes it
+        at the 1h breakpoint and later calls read it; a warmup would only
+        move that one write to boot, as a paid call.
 
         Idempotent and safe to race against a concurrent first recall —
         the recall hot path's lazy paths are guards, not initializers, so

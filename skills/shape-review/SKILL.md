@@ -6,8 +6,9 @@ description: >-
   to propose a different behavior-equivalent implementation. Runs after a fix is written (or on
   the stated plan before code exists) and before defect review. Triggers: "is this the right
   shape", "is there a simpler, less spread shape", "should this be a delete instead of a check",
-  "did we fix one agent or all of them", "is this drift". Cheap by design (two brain recalls) so
-  it can run on every fix. Not for line polish, bug hunting, or restructuring a subsystem — those
+  "did we fix one agent or all of them", "is this drift", "we deleted X — did the mechanism go or
+  just the symbol", "is this the last instance of the class or are there more". Cheap by design
+  (two brain recalls) so it can run on every fix. Not for line polish, bug hunting, or restructuring a subsystem — those
   are the sibling review skills.
 ---
 
@@ -44,9 +45,10 @@ Nothing else by default. No episodes, no edge walks, no correction sweeps, no su
 `recall` returns full nodes — bodies and edges — and everything printed into context is paid for
 whether you read it or not; there is no titles-only mode. So the cap is on calls *and* on what
 you open afterwards: two recalls at `limit` 5, then at most **two** body or `get_nodes` openings,
-only for hits that could change the verdict. Do not re-read a function you already have. First
-rough estimate (Codex dry run, 2026-09-13, not telemetry): 20–25k tokens, inflated by redundant
-code reads. Benchmark clean runs, KEEP included, before treating any number as the target.
+only for hits that could change the verdict. Do not re-read a function you already have. Measured
+2026-10-05 on Opus 5.5 subagents, 15 runs, KEEP and non-KEEP alike: 105–157k tokens per run, of
+which ~75k is the agent's fixed overhead before any skill work; the skill itself costs 40–85k.
+Inline in a live session that overhead is already paid, so a run costs the skill's share only.
 Expansions (below) are earned only by a non-KEEP verdict, and they are opt-in and named — reach
 for them knowingly.
 
@@ -75,32 +77,51 @@ Input is the mechanism as stated (two or three lines) plus the requirement; no g
 Phase 0 steps 1–2 come from the stated mechanism; siblings are still grepped; everything else
 is identical.
 
+**Deletions are diffs too.** A removal gets the same six probes: did the mechanism go or only its
+symbol, and do siblings of the deleted thing still stand (probe 6 on what remains).
+
 ## Phase 0 — Requirement, unit, siblings (one pass)
 
 1. **State the requirement first**, in one line, as you infer it from the diff, its tests, and the
    commit message. Say it before anything else so the operator can correct it. "Simplest" has no
    meaning without it. If the shape came from an explicit operator ruling, say that too — a
    RESHAPE then knows it is challenging a decision, which is allowed, but must be said.
-2. **Name the changed unit(s)** — the function, handler, encoder, hook, prompt section, DAL method,
-   fixture. "Unit" is anything with a role that other things also play.
-3. **Grep for siblings** — other units with the same role (same directory, naming family, same
-   dispatch table, same base class). Scope the grep to that home; do not sweep the repo. Count
-   them. If the hit list does not fit one screen, that is itself the probe-6 signal — record the
-   count and move on. This number feeds probe 6.
-4. **Recall #1** — how does this codebase already handle this *class* of problem? Phrase it as
+2. **Name the changed unit(s) and their role** — the function, handler, encoder, hook, prompt
+   section, DAL method, fixture. Then state the role as the question the unit answers (*"keep a
+   log sink from eating disk"*, not `_check_rate_limit`) and its effect: the table, file, env var
+   or state it writes, deletes or reads. "Unit" is anything with a role that other things also play.
+3. **Recall #1** — how does this codebase already handle this *class* of problem? Phrase it as
    what you'd remember, not a keyword: *"how the brain invalidates derived vectors when their
    source changes"*, not `delete_for_node`. `limit` 5. This one query feeds probes 1, 4 and 5 —
    the house pattern, the layering doctrine and the special-case history tend to surface together.
+4. **Recall #2** — *"what else in this codebase answers <role question>; the governing layer or
+   prior consolidation for this role"*, `limit` 5. Siblings are defined by role, and the brain
+   holds role-named classes whose members share no name in code. Every unit the recall names is a
+   sibling candidate to verify by grep in the next step.
+5. **Grep for siblings by effect, then by name** — first the effect from step 2 (the table or
+   file written, the state deleted, the env var read), then the names the recalls surfaced, then
+   the unit's own naming family, dispatch table or base class. Scope each grep to its home; do
+   not sweep the repo. Drop hits whose role differs and say so. Count. If the hit list does not
+   fit one screen, that is itself the probe-6 signal — record the count and move on. This number
+   feeds probe 6.
 
 Every recalled node is a **prediction to verify** against the current code, never a verdict.
 
 ## Phase 1 — Six probes
 
-Run all six, every time, inline. Each ends in one line: the answer, and the **Payoff** if it
-fires (what the alternative buys: lines, hot-path cost, races, coherence, one owner, places that
-must remember it N → 1). A probe that
-does not fire gets one word. These lines are working notes; only fired probes carry into the
-verdict, as the content of its RESHAPE or CLASS-FIX block.
+Run all six, every time, inline. Each ends in one line: a **strength** on the scale below, the
+answer, and the **Payoff** when strength is 2 or more (what the alternative buys: lines, hot-path
+cost, races, coherence, one owner, places that must remember it N → 1). A probe at 0 gets the
+number alone. These lines are working notes; probes at 2 or 3 carry into the verdict, as the
+content of its RESHAPE or CLASS-FIX block.
+
+Strength scale, used for every probe and for the verdict's confidence:
+- **0** — nothing there; the question was asked and the code answers it cleanly.
+- **1** — a faint alternative or a possible sibling; not clearly better, or not verified.
+- **2** — a clear alternative that wins on at least one payoff axis, or a sibling verified in code.
+- **3** — the alternative dominates, or the class is confirmed; keeping the shape is itself a defect.
+Strength is evidence, not conviction: 3 means read and verified, 1 means suspected from a recall
+or a name. The reader turns the numbers into a picture; the verdict does not round them.
 
 1. **Existing mechanism.** Does the codebase already solve this class elsewhere? Name it and ask
    why the diff did not use it. *Example: a staleness predicate was added to a coverage sweep
@@ -131,9 +152,8 @@ verdict, as the content of its RESHAPE or CLASS-FIX block.
    - fixed **one** instance (the one that was noticed);
    - fixed **one or two more** (the ones that came to mind);
    - fixed **all N by copy** (N copies of the same fix — drift with extra steps).
-   **Recall #2**, only for this probe: *"the governing layer or prior consolidation for
-   <this role>"*, `limit` 5. Grep tells you how many siblings; the brain tells you whether a layer
-   already exists and why. *Example: a sixth copy of a marker literal in a DAL query was refused
+   Recall #2 (Phase 0) already said whether a layer exists and why; verify it against the code
+   here. *Example: a sixth copy of a marker literal in a DAL query was refused
    because the contract already owned `is_machine_turn`; two per-door count clamps became one
    parameterized helper.* If the diff is the first instance and no siblings exist, say so — a
    single instance is not drift.
@@ -144,10 +164,11 @@ Short. Not a findings list. The reader decides in one screen.
 
 ```
 Requirement: <one line, as inferred>          [from operator ruling <id> — yes/no]
-Unit(s): <what changed>   Siblings: <N> (<where>)
-Verdict: KEEP | RESHAPE | CLASS-FIX
+Unit(s): <what changed>   Role: <the question the unit answers>
+Siblings: <N> (<where>; enumerated by: name | role | effect-verified)
+Verdict: KEEP | RESHAPE | CLASS-FIX   Confidence: <0–3> — <what would move it>
 
-Probes: 1 <fired/—> · 2 <fired/—> · 3 … · 6 <fired/—>
+Probes: 1:<0–3> · 2:<0–3> · 3:<0–3> · 4:<0–3> · 5:<0–3> · 6:<0–3>
 
 RESHAPE — <alternative in 3–5 lines>
   Payoff: <lines, hot-path cost, races closed, coherence, single owner>
@@ -157,12 +178,22 @@ RESHAPE — <alternative in 3–5 lines>
 CLASS-FIX — siblings sharing the defect: <list, marked>
   Governing layer: <exists at … | should exist, home: …>
 
-Coverage: <what was read/grepped/recalled; what was not>
+Coverage: <what was read/grepped/recalled; the grep patterns behind any "no caller" claim or sibling count; what was not>
 ```
 
-Print only the block that applies. A **KEEP** prints the header, the probe row and the Coverage
-line, and stops — no block. KEEP is a normal and frequent result. Manufacturing an alternative to
+Print only the block that applies. A **KEEP** prints the header, the probe row, Confidence and the
+Coverage line, and stops — no block. A probe at 1 under a KEEP is not hidden: it stays in the row,
+so the reader sees where the shape is merely adequate. KEEP is a normal and frequent result. Manufacturing an alternative to
 look useful is a defect of this skill, not a finding.
+
+**Write-back is part of a non-KEEP verdict, not an expansion.** Before handing back a RESHAPE or
+CLASS-FIX, `remember` it with a `connect_to` edge: a RESHAPE `supersedes` the original design node
+if one exists; a CLASS-FIX names the governing layer and the case that motivated it. If recall #1
+or #2 already surfaced a node holding this verdict, `revise` or `connect` that node instead of
+writing a second. Write back the verdict only: a recalled node's claims about main, deploys or
+merges are not checked against a branch or an older checkout, so do not "correct" them from
+here. This is what makes probe 6 sharper on the next run — without it every run rediscovers the
+layers from scratch.
 
 ## Expansions — only after a non-KEEP verdict
 
@@ -171,12 +202,11 @@ Earned, not default. Name the one you use.
 - **Settled-constraint check.** `get_nodes` on the hits the verdict rests on, following
   `supersedes` / `corrects` one hop. An alternative that undoes a locked decision or a recorded
   correction is a false positive — drop it, or surface the tension instead of proposing.
-- **Requirement check.** `recall_episodes` on the requirement — only when the diff's shape came
-  from an explicit ruling and the verdict challenges it. Quote the ruling.
-- **Write-back.** `remember` the verdict with a `connect_to` edge: a RESHAPE `supersedes` the
-  original design node if one exists; a CLASS-FIX names the governing layer and the case that
-  motivated it. This is what makes probe 6 sharper on the next run — without it every run rediscovers the
-  layers from scratch.
+- **Requirement check.** `recall_episodes` on the requirement — when the diff's shape came from an
+  explicit ruling the verdict challenges, and on any RESHAPE whose Gives-up names a property the
+  operator may already have accepted (a known caveat, a declined guard, a tolerated race). Two
+  recalls at limit 5 can miss a ruling, and a RESHAPE that undoes one is a false positive. Quote
+  the ruling when found and lower Confidence to the number it leaves.
 
 ## Guardrails
 
@@ -184,6 +214,10 @@ Earned, not default. Name the one you use.
   then `/code-review`.
 - **Verify what you recall.** A recalled house pattern may have moved, been superseded, or never
   have been adopted. Grep it before you cite it.
+- **A "no caller" claim is a grep claim.** Grep the method name, the owning type (callers hold the
+  instance in a local variable the method-name grep never sees) and attribute access on it, and
+  put the patterns in Coverage. *A full-text search mode was called callerless after a method-name
+  grep; the verbatim-phrase tool called it through a local.*
 - **Proportionate.** Inline by default. Spawn a subagent (if your host has them) only when probe 6
   finds a wide class — more siblings than you can read in one sitting — and say that you did.
 - **Coverage is loud.** A shallow read that returns KEEP is a false all-clear. If you did not read

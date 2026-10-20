@@ -113,6 +113,19 @@ def log_test_result(test_class, test_method, status, duration_ms,
               % (type(_e).__name__, _e), file=sys.stderr)
 
 
+# ── Conversation turns from message rows ───────────────────────────
+
+def turns_of(messages):
+    """Role-tagged message rows → turns, as brain.conversation_turns hands
+    them to the Surface and the encoder (trace_contract.group_turns). A row
+    without a ref_type reads as the operator's or the assistant's by its
+    role; a row without a chain joins nothing."""
+    from servers.trace_contract import group_turns
+    return group_turns([dict(m, ref_type=m.get('ref_type') or (
+        'assistant_message' if m.get('role') == 'assistant' else 'user_message'))
+        for m in messages or []])
+
+
 # ── BrainTestBase — for unit tests ──────────────────────────────────
 
 class BrainTestBase(unittest.TestCase):

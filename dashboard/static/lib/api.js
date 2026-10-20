@@ -81,15 +81,20 @@ export const api = {
   node:                (id)     => get('/api/node/' + encodeURIComponent(id)),
   nodeCorrections:     (id)     => get('/api/node/' + encodeURIComponent(id) + '/corrections'),
   nodeSourceRefs:      (id)     => get('/api/node/' + encodeURIComponent(id) + '/source-refs'),
-  // Self-channel (Streams tab)
+  // Self-channel (Sessions tab)
   selfMessages:        (p = {}) => get('/api/self-messages' + _qs(p)),
   bootRenders:         (p = {}) => get('/api/boot-renders' + _qs(p)),
-  // One session's OWN operator conversation (identity cue, not stream traffic)
+  // One session's OWN operator conversation (identity cue, not session traffic)
   sessionMessages:     (p = {}) => get('/api/session-messages' + _qs(p)),
   selfPresence:        (p = {}) => get('/api/self-presence' + _qs(p)),
   selfSend:            (body)   => post('/api/self-send', body),
   // Thalamus (the brain's standing-intent queue) — items + delivery ledger
   thalamus:            (p = {}) => get('/api/thalamus' + _qs(p)),
+  // Configuration — brain location, the gate (pause / ignored projects /
+  // machine envelopes, with a verdict per live project), key presence. The
+  // pause flip is the daemon's gate command, proxied; pause / resume only.
+  config:              (p = {}) => get('/api/config' + _qs(p)),
+  gate:                (body)   => post('/api/gate', body),
   // The recall probe — POST because it carries a query body, not because it
   // writes. The server pins mark_accessed=False, so it stays a pure read.
   recall:              (body)   => post('/api/recall', body),

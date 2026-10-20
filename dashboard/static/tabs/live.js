@@ -10,7 +10,7 @@
 // This module owns:
 //   • the split layout (graph ⇄ stream) + graph visibility
 //   • the insights panel
-//   • the stream rail — who is live, and which stream the feed is focused on
+//   • the session rail — who is live, and which session the feed is focused on
 //   • the activity feed: fetch, assemble, incremental render
 //   • the graph's live coupling (hover previews, click pins, live firing)
 //
@@ -49,27 +49,27 @@ const _encodesByChain = new Map();
 const _rendered = new Map();
 
 let _focusSession = '';
-// Whether the collapsed resting-stream group is expanded. Page-session state:
+// Whether the collapsed resting-session group is expanded. Page-session state:
 // a rail that reopened itself on every poll would fight the operator.
 let _restingOpen = false;
 
-// ── Stream rail ────────────────────────────────────────────────────────────
-// Streams are shown, not listed: one pill per stream in its own hue. Clicking a
-// pill focuses the feed on it; clicking again clears. With several streams
+// ── Session rail ────────────────────────────────────────────────────────────
+// Sessions are shown, not listed: one pill per session in its own hue. Clicking a
+// pill focuses the feed on it; clicking again clears. With several sessions
 // interleaving, the hue is what makes a row readable at a glance — the pill is
 // where you learn which hue is whom.
 //
-// Dormant streams collapse behind a count. A machine accumulates them, and at
+// Dormant sessions collapse behind a count. A machine accumulates them, and at
 // full width they would wrap the rail onto several rows and push the feed
 // down — so the ones actually thinking get the space, and the rest are one
 // click away.
 
-function _renderStreamRail() {
-  const rail = document.getElementById('stream-rail');
+function _renderSessionRail() {
+  const rail = document.getElementById('session-rail');
   if (!rail) return;
 
-  // Streams worth a pill: live ones, plus any that own a card on screen
-  // (a stream that just ended is still the thing you're reading).
+  // Sessions worth a pill: live ones, plus any that own a card on screen
+  // (a session that just ended is still the thing you're reading).
   const live = sessions.liveSessions();
   const seen = new Set(live.map(s => s.id));
   const inFeed = [];
@@ -90,32 +90,32 @@ function _renderStreamRail() {
     const active = _focusSession === s.id;
     const awakeNow = isAwake(s);
     return el('button', {
-      class: ['stream-pill', active && 'stream-pill--active', !awakeNow && 'stream-pill--dormant']
+      class: ['session-pill', active && 'session-pill--active', !awakeNow && 'session-pill--dormant']
         .filter(Boolean),
-      style: { '--stream-color': color },
+      style: { '--session-color': color },
       title: sessions.sessionTooltip(s.id),
       onclick: () => setFocusSession(active ? '' : s.id),
     },
       el('span', {
-        class: ['stream-pill-dot', awakeNow && 'stream-pill-dot--live'].filter(Boolean),
+        class: ['session-pill-dot', awakeNow && 'session-pill-dot--live'].filter(Boolean),
         style: { background: color },
       }),
-      el('span', { class: 'stream-pill-name' }, sessions.sessionLabel(s.id)),
-      s.turns ? el('span', { class: 'stream-pill-count' }, String(s.turns)) : null,
+      el('span', { class: 'session-pill-name' }, sessions.sessionLabel(s.id)),
+      s.turns ? el('span', { class: 'session-pill-count' }, String(s.turns)) : null,
     );
   };
 
   const pills = [
     el('button', {
-      class: ['stream-pill', 'stream-pill--all', !_focusSession && 'stream-pill--active']
+      class: ['session-pill', 'session-pill--all', !_focusSession && 'session-pill--active']
         .filter(Boolean),
-      title: 'Every stream, newest first',
+      title: 'Every session, newest first',
       onclick: () => setFocusSession(''),
-    }, 'all streams', el('span', { class: 'stream-pill-count' }, String(rows.length))),
+    }, 'all sessions', el('span', { class: 'session-pill-count' }, String(rows.length))),
     ...awake.map(pill),
   ];
 
-  // Keep a focused resting stream visible even while collapsed — hiding the
+  // Keep a focused resting session visible even while collapsed — hiding the
   // pill you just clicked would leave the filter on with nothing indicating it.
   const focusedResting = resting.find(s => s.id === _focusSession);
   if (focusedResting) pills.push(pill(focusedResting));
@@ -123,10 +123,10 @@ function _renderStreamRail() {
   const hidden = resting.filter(s => s.id !== _focusSession);
   if (hidden.length) {
     pills.push(el('button', {
-      class: ['stream-pill', 'stream-pill--more', _restingOpen && 'stream-pill--active']
+      class: ['session-pill', 'session-pill--more', _restingOpen && 'session-pill--active']
         .filter(Boolean),
       title: hidden.map(s => sessions.sessionLabel(s.id)).join('\n'),
-      onclick: () => { _restingOpen = !_restingOpen; _renderStreamRail(); },
+      onclick: () => { _restingOpen = !_restingOpen; _renderSessionRail(); },
     }, (_restingOpen ? '▾ ' : '▸ ') + hidden.length + ' resting'));
     if (_restingOpen) pills.push(...hidden.map(pill));
   }
@@ -137,9 +137,9 @@ export function setFocusSession(sessionId) {
   if (_focusSession === sessionId) return;
   _focusSession = sessionId || '';
   // Focus is a filter over what we already hold — no refetch, so switching
-  // streams is instant. Re-assert visibility on every rendered card.
+  // sessions is instant. Re-assert visibility on every rendered card.
   _applyFocus();
-  _renderStreamRail();
+  _renderSessionRail();
 }
 
 function _applyFocus() {
@@ -306,7 +306,7 @@ function _syncFeed() {
   _trim(_encodesByChain, ENCODE_WINDOW.limit, r => r.start_ts || '');
 
   _renderFeedEmptyState();
-  _renderStreamRail();
+  _renderSessionRail();
 }
 
 // Drop the OLDEST entries past `max`, by timestamp.
@@ -534,7 +534,7 @@ export function init() {
   _renderFeedEmptyState();
 
   bus.subscribe('insights:tick', _renderInsightsPanel);
-  bus.subscribe('sessions:tick', () => { _renderStreamRail(); });
+  bus.subscribe('sessions:tick', () => { _renderSessionRail(); });
   _wireInsightsDismiss();
 
   // Pinned-card highlight. graph.js publishes `graph:pinned` when a pin is

@@ -17,7 +17,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from servers.brain import Brain
 from servers.daemon_server import BrainDaemon
 from servers.daemon_hooks import (
-    hook_recall, hook_pre_edit, hook_pre_bash_safety,
+    hook_recall, hook_pre_edit,
 )
 from tests.brain_test_base import BrainTestBase
 
@@ -54,28 +54,13 @@ class TestHookFunctions(BrainTestBase):
                                           'session_id': 'test-system-recall'}, [])
         self.assertIn('json', result)
 
-    def test_pre_edit_approves(self):
-        """Pre-edit hook should approve and return decision."""
+    def test_pre_edit_never_decides(self):
+        """The tool moment informs, it never decides: a json envelope with at
+        most additionalContext, never a permission decision."""
         result = hook_pre_edit(self.brain, {
-            'filename': 'auth.py', 'tool_name': 'Edit'}, [])
+            'path': 'auth.py', 'session_id': 'test-system-edit'}, [])
         self.assertIn('json', result)
-        self.assertEqual(result['json'].get('decision'), 'approve')
-
-    def test_pre_bash_returns_decision(self):
-        """Pre-bash safety should return a decision for destructive commands."""
-        result = hook_pre_bash_safety(self.brain, {
-            'command': 'rm -rf /tmp/important'}, [])
-        self.assertIn('json', result)
-        self.assertIn(result['json'].get('decision'), ['approve', 'block'])
-
-    def test_pre_bash_approves_safe(self):
-        """Non-destructive commands should be approved — assert the decision,
-        not just the envelope. The old check only verified 'json' was present,
-        so it passed regardless of whether a safe command was approved."""
-        result = hook_pre_bash_safety(self.brain, {
-            'command': 'ls -la /tmp'}, [])
-        self.assertIn('json', result)
-        self.assertEqual(result['json'].get('decision'), 'approve')
+        self.assertNotIn('decision', result['json'])
 
 
 class TestDaemonDispatch(unittest.TestCase):
@@ -85,7 +70,7 @@ class TestDaemonDispatch(unittest.TestCase):
         """HOOK_TABLE has entries for all hook functions."""
         expected_hooks = [
             'hook_recall', 'hook_post_response_track',
-            'hook_pre_edit', 'hook_pre_bash_safety',
+            'hook_pre_edit',
             'hook_session_end', 'hook_stop_failure_log',
             'hook_worktree_context', 'hook_worktree_cleanup',
         ]
@@ -106,9 +91,9 @@ class TestDaemonDispatch(unittest.TestCase):
                            f"daemon_hooks missing: {hook_name}")
 
     def test_hook_table_dirty_flags(self):
-        """Only pre_bash_safety should be non-dirty (read-only)."""
+        """Every hook marks the brain dirty."""
         non_dirty = [name for name, (_iw, dirty) in BrainDaemon.HOOK_TABLE.items() if not dirty]
-        self.assertEqual(non_dirty, ['hook_pre_bash_safety'])
+        self.assertEqual(non_dirty, [])
 
 
 if __name__ == '__main__':

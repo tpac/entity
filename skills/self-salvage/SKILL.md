@@ -36,7 +36,7 @@ and its provenance. A supersedes edge helps reconciliation; it does not guarante
 
 Check what the Scribe has actually encoded, then close the remaining gap. Relevant doors include
 `query_traces` for `encoding_run` and `journal_note`, and `recall_episodes` for events. Read existing
-nodes before restating them. Attribute other streams' observations to them. Empty results do not
+nodes before restating them. Attribute other sessions' observations to them. Empty results do not
 prove nothing happened: inspect the actual schema, arguments and response before diagnosing a miss.
 
 Use evidence that can support each claim:

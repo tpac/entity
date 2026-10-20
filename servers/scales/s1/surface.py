@@ -23,11 +23,11 @@ from servers.trace_contract import (
 
 # SURFACE_SELECTION_SCHEMA lives in surface_contract.py alongside the other
 # surface I/O contracts (the render formats for each mode). Imported below.
-def seen_node_ids(recent_messages):
+def seen_node_ids(recent_turns):
     """Short (8-char) ids of nodes already injected in this session's window.
 
-    Reads the per-turn `surfaced` lists the hook already fetched
-    (get_session_turns with_surfaced=True) — no extra query. Used to drop
+    Reads the `surfaced` lists on the window's incoming rows the hook already
+    read (brain.conversation_turns with_surfaced=True) — no extra query. Used to drop
     already-shown nodes from the candidate pool BEFORE the final cap: the
     v13 design said out-of-scope is structural (<shown> vs <candidate>),
     but the same id kept re-entering <candidates> and Haiku re-picked it
@@ -36,17 +36,19 @@ def seen_node_ids(recent_messages):
     Selected-only by construction — spread/expanded nodes are not in the
     `surfaced` lists and are NOT deduped here (known gap, separate fix).
     """
+    from servers.trace_contract import turn_incoming
     seen = set()
-    for t in recent_messages or []:
-        for s in (t.get('surfaced') or []):
-            sid = str(s.get('id') or '')[:8]
-            if sid:
-                seen.add(sid)
+    for t in recent_turns or []:
+        for row in turn_incoming(t):
+            for s in (row.get('surfaced') or []):
+                sid = str(s.get('id') or '')[:8]
+                if sid:
+                    seen.add(sid)
     return seen
 
 
 def _call_surface(brain, candidates_data, user_message,
-                  recent_messages, session_id, result, frame='',
+                  recent_turns, session_id, result, frame='',
                   scope=None):
     """Call Haiku to surface relevant nodes from candidates.
 
@@ -55,14 +57,16 @@ def _call_surface(brain, candidates_data, user_message,
         stamp is the K-provenance dict resolved with the instructions
         ('fingerprint'/'source'/'version'/'id') for the trace writers.
         telemetry is the shared run-cost dict (build_run_telemetry kwargs:
-        token counts + elapsed_ms + rounds + truncated) for the K trace.
+        token counts + elapsed_ms + rounds + truncated + model) plus the
+        call's effort, for the K trace.
 
     The call is the agentic loop: fetch tools (fetch_tools.TOOL_DEFINITIONS)
     offered every round, final round forced to select.
     """
     from servers.scales.s1.surface_contract import (
         build_surface_prompt, prepare_presented_candidates,
-        presentation_shuffle_seed, SURFACE_MODEL, SURFACE_VARIANT)
+        presentation_shuffle_seed, SURFACE_EFFORT, SURFACE_MODEL,
+        SURFACE_VARIANT)
 
     # Retrieval stats from recall result.
     retrieval_stats = result.get('_retrieval_stats') if isinstance(result, dict) else None
@@ -101,7 +105,7 @@ def _call_surface(brain, candidates_data, user_message,
 
     user_content, max_tokens = build_surface_prompt(
         candidates_data, user_message,
-        recent_messages=recent_messages,
+        recent_turns=recent_turns,
         retrieval_stats=retrieval_stats,
         frame=frame,
         shuffle_seed=shuffle_seed,
@@ -117,13 +121,13 @@ def _call_surface(brain, candidates_data, user_message,
     # `capture` below is None-safe.
     capture = surface_capture.begin(
         brain, candidates_data=candidates_data, user_message=user_message,
-        recent_messages=recent_messages,
+        recent_turns=recent_turns,
         retrieval_stats=retrieval_stats, frame=frame, layout=layout,
         shuffle_seed=shuffle_seed, scope=scope,
         surface_instructions=surface_instructions,
         interaction_stamp=stamp, user_content=user_content,
         max_tokens=max_tokens, variant=SURFACE_VARIANT, model=SURFACE_MODEL,
-        session_id=session_id)
+        effort=SURFACE_EFFORT, session_id=session_id)
 
     # Shared client, built-and-cached once on the brain. No per-call throwaway
     # fallback: Brain._ensure_anthropic_client is the single construction site
@@ -139,7 +143,7 @@ def _call_surface(brain, candidates_data, user_message,
         client, brain, candidates_data, surface_instructions,
         user_content, max_tokens, session_id, SURFACE_MODEL,
         capture=capture, scope=scope,
-        seen_ids=seen_node_ids(recent_messages))
+        seen_ids=seen_node_ids(recent_turns), effort=SURFACE_EFFORT)
     # Attach tool trace to brain for the caller to write into K trace.
     # Stashed on the brain instance per-session-id so parallel sessions
     # don't clobber each other.
@@ -166,10 +170,11 @@ def _call_surface(brain, candidates_data, user_message,
         brain._surface_captures[session_id] = capture
 
     surfaced = _parse_surfacer_json(raw)
-    if surfaced is None and raw:
+    if surfaced is None and raw and not telemetry.get('truncated'):
         # We had a non-empty Haiku response but couldn't parse anything
         # dict-shaped from it. Surface this — it's the silent-failure mode
         # that produced empty additionalContext at N=15 (fishing query).
+        # A reply cut off mid-JSON is already logged as surface_truncation.
         brain._log_error(
             'surface_haiku_unparseable',
             ValueError('Haiku response did not yield a parseable JSON dict'),
@@ -184,7 +189,8 @@ def _call_surface(brain, candidates_data, user_message,
 def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
                            user_content, max_tokens, session_id, model,
                            max_rounds=2, capture=None,
-                           scope=None, seen_ids=None, run_tool=None):
+                           scope=None, seen_ids=None, run_tool=None,
+                           effort=None, thinking=None):
     """Agentic surface call: Haiku may use fetch tools to extend the candidate
     pool before final JSON selection.
 
@@ -196,20 +202,24 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
     tool_calls: [...]} for trace observability (total_ms + usage per API call,
     mirroring run_llm_loop's per_round_stats), and telemetry is the shared
     run-cost dict (build_run_telemetry kwargs) summed across the loop's
-    Haiku rounds.
+    Haiku rounds, plus the effort the calls were sent with.
 
     Mutates `candidates_data` IN PLACE — tool-fetched candidates are appended
     so the downstream short_to_full ID mapping (in run_surface) can resolve them.
 
-    `seen_ids` (8-char): nodes already shown to this stream in the window.
+    `seen_ids` (8-char): nodes already shown to this session in the window.
     Tool results carrying them are dropped before Haiku sees them — the
-    stream has them in context, and a re-fetch through a tool was how one
+    session has them in context, and a re-fetch through a tool was how one
     audited turn re-rendered 8,431 chars it already had.
 
     `run_tool` executes each tool call (default fetch_tools.execute_tool,
     which reads `brain`). An eval whose whole candidate menu is a fixture
     passes its own, so the loop runs unchanged while the tools answer from
     the fixture instead of a brain.
+
+    `effort` (output_config.effort) and `thinking` (the request's thinking
+    param) ride on every round when set; None sends neither, which is what
+    a model without them (Haiku 4.5) requires.
     """
     from servers.scales.s1.fetch_tools import (
         TOOL_DEFINITIONS, execute_tool, format_tool_result_for_haiku,
@@ -239,8 +249,8 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
     #   BP2 (here) — the round-1 user content (~20K tokens incl. the
     #   candidate pool): read back by round 2 at 0.1× price and much
     #   faster prefill. Requires tools to be byte-identical across rounds.
-    # Prompts under the model's 4096-token cacheable minimum are silently
-    # not cached (no error).
+    # Prompts under the model's cacheable minimum (CACHE_MIN_PREFIX_TOKENS)
+    # are silently not cached (no error).
     messages = [{"role": "user", "content": [
         {"type": "text", "text": user_content,
          "cache_control": {"type": "ephemeral"}}]}]
@@ -256,10 +266,14 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
     truncated = 0
 
     def _telemetry():
-        return build_run_telemetry(
+        # The effort rides beside the model: the K trace spreads this dict
+        # flat, and Surface's model and effort are code constants that no
+        # interaction stamp covers ('' when none was sent).
+        return {**build_run_telemetry(
             **usage_total,
             elapsed_ms=int((time.time() - _t0) * 1000),
-            rounds=rounds_used, truncated=truncated, model=model)
+            rounds=rounds_used, truncated=truncated, model=model),
+            'effort': effort or ''}
 
     def _absorb_response(resp):
         """Fold one Haiku response into the running cost totals and capture
@@ -290,6 +304,8 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
             'schema': SURFACE_SELECTION_SCHEMA,
         },
     }
+    if effort:
+        output_config['effort'] = effort
 
     for round_idx in range(max_rounds):
         is_final = (round_idx == max_rounds - 1)
@@ -309,6 +325,8 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
             'output_config': output_config,
             'tools': TOOL_DEFINITIONS,
         }
+        if thinking:
+            api_kwargs['thinking'] = thinking
         if is_final:
             api_kwargs['tool_choice'] = {'type': 'none'}
 
@@ -340,6 +358,19 @@ def _call_surface_agentic(client, brain, candidates_data, surface_instructions,
                 'session=%s' % session_id)
 
         stop_reason = api_resp.stop_reason
+        if stop_reason in ('max_tokens', 'refusal'):
+            # Either stop ends the loop without a usable selection — a
+            # thinking model can spend max_tokens before writing any text,
+            # and a refusal writes none — so say why rather than let the
+            # turn surface nothing silently.
+            brain._log_error(
+                'surface_truncation' if stop_reason == 'max_tokens'
+                else 'surface_refusal',
+                RuntimeError('agentic round %d stopped: %s'
+                             % (round_idx, stop_reason)),
+                'output_tokens=%d max_tokens=%d stop_details=%s session=%s' % (
+                    round_usage.get('output_tokens') or 0, max_tokens,
+                    getattr(api_resp, 'stop_details', None), session_id))
         # Per-API-call cost, same field names as run_llm_loop's
         # per_round_stats (total_ms + USAGE_FIELDS; no ttft_ms — this path
         # is non-streaming). Distinguishes a slow/retried call (high
@@ -631,7 +662,7 @@ def _write_traces(brain, ctx, candidates_data, selected_ids,
                   not_shown=None, redirected=None, also_lit=None):
     """Write S1 surface traces: O (candidates), K (surfaced), Δ (additionalContext).
 
-    `selected_ids` is what the stream SAW — the seeds the render delivered.
+    `selected_ids` is what the session SAW — the seeds the render delivered.
     Every reader of the K trace's `selected` / ref_id (the per-turn <shown>
     list and pool dedup, co-access, LAF's surfaced role, the time tool's
     'discussed' anchor, the S2 decoders) means exactly that, so it is the
@@ -791,8 +822,9 @@ def _write_traces(brain, ctx, candidates_data, selected_ids,
         **((getattr(brain, '_surface_presented', {}) or {}).pop(session_id, None) or {}),
         'surface_variant': SURFACE_VARIANT,
         **interaction_fields(stamp),
-        # telemetry is already a complete build_run_telemetry dict from the
-        # surface loop; spread it flat (fallback to the all-zero block on None).
+        # telemetry is already a complete build_run_telemetry dict (plus the
+        # call's effort) from the surface loop; spread it flat (fallback to
+        # the all-zero block on None).
         **(telemetry or build_run_telemetry()),
         # Per-phase latency (structured, queryable — the hook_phase_timing debug
         # string's data) + the run outcome. 'served' when context reached Anchor,
@@ -1010,7 +1042,7 @@ def _resolve_picks(brain, selected, candidates_data, session_id):
             # outside-the-menu BY CONSTRUCTION. The two outcomes that do
             # cost something each have their own channel: an id that
             # resolves nowhere (surface_unknown_selected_id) and a re-pick
-            # this stream already holds (surface_selected_already_shown,
+            # this session already holds (surface_selected_already_shown,
             # dropped below). This one stays visible as a rate, not an
             # alarm.
             brain._log_warning(
@@ -1021,7 +1053,7 @@ def _resolve_picks(brain, selected, candidates_data, session_id):
                 'short_id=%s resolved=%s' % (short_id, resolved[:12]))
         else:
             # Single loud channel for an id that exists nowhere — the
-            # scoreboard's drift section counts this stream, and the
+            # scoreboard's drift section counts this session, and the
             # dashboard error feed shows warnings alongside errors. A
             # silent drop here is exactly how the v12_1_full
             # empty-context miss went unnoticed.
@@ -1036,7 +1068,7 @@ def _resolve_picks(brain, selected, candidates_data, session_id):
 
 
 def run_surface(brain, ctx, candidates_data, user_message,
-                recent_messages, result, enriched, results, recall_ref,
+                recent_turns, result, enriched, results, recall_ref,
                 session_id, graph_changes, query_vec=None, prior_vecs=None,
                 frame='', pt=None):
     """S1 Surface: Haiku-select → gates → spread_activation → seeds-first
@@ -1072,7 +1104,7 @@ def run_surface(brain, ctx, candidates_data, user_message,
 
     # Call Haiku selector — picks up to SURFACE['max_selected'] from the menu.
     surfaced, surface_prompt, max_tokens, stamp, telemetry = _call_surface(
-        brain, candidates_data, user_message, recent_messages,
+        brain, candidates_data, user_message, recent_turns,
         session_id, result, frame=frame, scope=scope)
     _mark('surface_haiku')
 
@@ -1087,7 +1119,7 @@ def run_surface(brain, ctx, candidates_data, user_message,
         session_id, None)
 
     # Haiku's picks as {full_id: render_mode}. Every pick that does not
-    # reach the stream is recorded in not_shown with its reason, so the K
+    # reach the session is recorded in not_shown with its reason, so the K
     # trace's `selected` can mean SHOWN while the picker's decision stays
     # auditable (`picked`, `redirected`).
     selected_mode, not_shown = _resolve_picks(
@@ -1138,17 +1170,34 @@ def run_surface(brain, ctx, candidates_data, user_message,
                          '(isolation veil)' % _wid[:8]),
             'session=%s' % session_id)
 
-    # Same-session gate — a pick the stream already has in context this
+    # Same-session gate — a pick the session already has in context this
     # window (the shown set the traces record) does not render again. The
     # prompt tells Haiku never to re-pick a <shown> id; this is the code
     # that holds it, loud so the re-pick rate stays visible.
-    seen8 = seen_node_ids(recent_messages)
+    seen8 = seen_node_ids(recent_turns)
     for _sid in [i for i in selected_mode if i[:8] in seen8]:
         _drop(_sid, 'already_shown')
         brain._log_warning(
             'surface_selected_already_shown',
-            'Haiku re-picked %s, shown to this stream earlier in the window '
+            'Haiku re-picked %s, shown to this session earlier in the window '
             '— not rendered again' % _sid[:8],
+            'session=%s' % session_id)
+
+    # Pick cap — the prompt asks for at most SURFACE['max_selected'], and
+    # structured outputs cannot bound an array's length, so this is the code
+    # that holds it: picks past the cap (in the order Haiku emitted them) do
+    # not seed or render, loud so the over-cap rate stays visible. Runs after
+    # the gates above so a dropped pick never takes a slot.
+    from servers.scales.s1.surface_contract import SURFACE
+    _over = list(selected_mode)[SURFACE['max_selected']:]
+    for _oid in _over:
+        _drop(_oid, 'over_cap')
+    if _over:
+        brain._log_warning(
+            'surface_over_cap',
+            'Haiku picked %d past the %d-pick cap — dropped %s' % (
+                len(_over), SURFACE['max_selected'],
+                [i[:8] for i in _over]),
             'session=%s' % session_id)
     _mark('surface_id_resolve')
 
@@ -1242,7 +1291,7 @@ def run_surface(brain, ctx, candidates_data, user_message,
     )
     additional_context = inject['text']
     not_shown.extend(inject['not_shown'])
-    # What the stream SAW — the K trace's `selected`. The picks are kept in
+    # What the session SAW — the K trace's `selected`. The picks are kept in
     # `picked`; the difference is spelled out in `not_shown`/`redirected`.
     shown_short_ids = {fid[:8] for fid in inject['shown']}
     _mark('surface_render')

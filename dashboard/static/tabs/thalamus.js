@@ -1,8 +1,8 @@
 // ===========================================================================
 // tabs/thalamus.js — the brain's standing-intent queue.
 // ---------------------------------------------------------------------------
-// Streams is the streams speaking to each other; this is the brain speaking to
-// its streams. An item is an ASK (needs an answer), a REMINDER (carries a
+// The Sessions tab is the sessions speaking to each other; this is the brain speaking to
+// its sessions. An item is an ASK (needs an answer), a REMINDER (carries a
 // clock) or a NOTICE (an undated FYI) — the kind is DERIVED, never stored, and
 // the derivation is mirrored from servers/channels/thalamus/thalamus_contract
 // (kind_of). The dashboard may not import servers.*, so it's replicated here;
@@ -10,7 +10,7 @@
 //
 // The card carries what the operator can't get from the queue count: the
 // delivery ledger — which sessions actually saw this, and at which moment
-// (boot / stop). An ask delivered to four streams and still unanswered looks
+// (boot / stop). An ask delivered to four sessions and still unanswered looks
 // nothing like one that never reached anybody, and only the ledger tells them
 // apart.
 //
@@ -43,7 +43,7 @@ function _kind(it) {
 // ── Audience, in plain words ───────────────────────────────────────────
 function _audienceText(it) {
   if (it.target_session) {
-    return 'for ' + (sessionLabel(it.target_session) || it.target_short);
+    return 'for ' + sessionLabel(it.target_session);
   }
   return it.audience === 'every_session'
     ? 'every session, once each'
@@ -97,7 +97,7 @@ function _renderItem(it) {
     ledger = '<div class="thal-ledger"><div class="thal-ledger-head">👁 seen by</div>'
       + dels.map(d =>
           '<div class="thal-ledger-row" title="' + escapeHtml(sessionTooltip(d.session_id)) + '">'
-          + '<span class="thal-ledger-who">' + escapeHtml(sessionLabel(d.session_id) || d.session_short) + '</span>'
+          + '<span class="thal-ledger-who">' + escapeHtml(sessionLabel(d.session_id)) + '</span>'
           + '<span class="thal-ledger-via">' + escapeHtml(d.via || '') + '</span>'
           + '<span class="thal-ledger-when" title="' + escapeHtml(localTime(d.delivered_at) || '') + '">'
           +   escapeHtml(relativeTime(d.delivered_at)) + '</span>'
@@ -177,7 +177,7 @@ function _paint() {
   if (!feed) return;
   if (!_items.length) {
     feed.innerHTML = '<div class="feed-empty">'
-      + 'The queue is empty — the brain has nothing standing for its streams right now.'
+      + 'The queue is empty — the brain has nothing standing for its sessions right now.'
       + '</div>';
     return;
   }

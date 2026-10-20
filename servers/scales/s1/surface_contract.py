@@ -15,6 +15,7 @@ Interaction: 'surface' in interactions table. Prompt is learnable.
 
 import hashlib
 import random
+import re
 import threading
 from datetime import datetime, timezone
 from collections import OrderedDict
@@ -188,11 +189,18 @@ CANDIDATE_POOL = {
 # doesn't have to reach into surface-call config to know which model to ping.
 #
 # Deliberately CODE, not interaction config (decided 2026-08-17): the value is
-# coupled to CACHE_MIN_PREFIX_TOKENS below (model-specific cache floor) and to
-# the warmup ping, so a config-driven model would silently desync both. Moves
+# coupled to SURFACE_EFFORT and CACHE_MIN_PREFIX_TOKENS below and to the
+# warmup ping, so a config-driven model would silently desync them. Moves
 # into the `surface` interaction's parameters when a provider adapter owns
 # cache strategy — at that point the coupling this protects dissolves.
-SURFACE_MODEL = 'claude-haiku-4-5'
+SURFACE_MODEL = 'claude-haiku-5-5'
+
+# How much SURFACE_MODEL thinks before it picks (output_config.effort). It
+# travels with the model: Haiku 5.5 thinks by default, and a model that takes
+# no effort (Haiku 4.5) rejects the parameter, so a model change sets this in
+# the same edit (None sends none). Medium over low: on replayed production
+# prompts (eval/surface_capture_ab.py) it picked better at ~1 s more latency.
+SURFACE_EFFORT = 'medium'
 
 # The surface path's name in traces (surface_selected's `surface_variant`, the
 # capture stamp). The agentic loop is the only path; the value keeps its
@@ -200,14 +208,12 @@ SURFACE_MODEL = 'claude-haiku-4-5'
 # old and new rows alike.
 SURFACE_VARIANT = 'v5_agentic'
 
-# Anthropic prompt-cache minimum cacheable prefix for SURFACE_MODEL.
-# Floors are model-specific: Haiku 4.5 + Opus 4.x = 4096; Sonnet 4.6 +
-# Fable 5 = 2048; Sonnet 4.5 and older = 1024. This constant is scoped to
-# SURFACE_MODEL (Haiku 4.5 → 4096); the Sonnet encoders live above that
-# floor at 2048. Prompts under the floor are silently not cached by the API.
-# The agentic loop's cache-miss tripwire gates on it so sub-minimum prompts
-# (tests, tiny brains) don't warn.
-CACHE_MIN_PREFIX_TOKENS = 4096
+# Anthropic prompt-cache minimum cacheable prefix for SURFACE_MODEL (Haiku
+# 5.5 → 512). Floors are model-specific, so this changes with the model.
+# Prompts under the floor are silently not cached by the API. The agentic
+# loop's cache-miss tripwire gates on it so sub-minimum prompts (tests, tiny
+# brains) don't warn.
+CACHE_MIN_PREFIX_TOKENS = 512
 
 # Interaction config default for the `surface` K. `layout` is the ONLY key
 # the runtime reads from this config (surface.py stamps it on the replay
@@ -233,21 +239,27 @@ SURFACE = {
     # 8,000). The assistant's message right before it is the single richest
     # prior turn — most of the vocabulary Haiku borrows from history comes
     # from assistant turns, sniper-style from the most recent — so it gets
-    # the same room. Older turns are context, capped tighter. Every cap
-    # must stay under PIPELINE['recent_message_content'] (the trace pull).
+    # the same room. Older turns are context, capped tighter.
     'current_message_limit': 8000,
     'last_anchor_message_limit': 8000,
     'user_message_limit': 1000,     # older user turns
+    'machine_message_limit': 300,   # the message that opened a turn someone else
+                                    # started (another session, a background task,
+                                    # a subagent): who sent it and its gist
     'anchor_message_limit': 1200,   # older assistant turns
-    'recent_messages': 8,           # previous MESSAGES (~4 exchanges when turns alternate;
-                                    # interrupted turns leave lone user messages, so pairing
-                                    # is not guaranteed). Single source of truth: daemon_hooks
-                                    # pulls exactly this many from traces (current chain
-                                    # excluded via exclude_trace_id, wake envelopes filtered);
-                                    # build_surface_prompt slices the same number. The current
-                                    # prompt is NOT in this window — it renders as the final
+    'recent_turns': 4,              # previous whole turns the OPERATOR spoke in, plus
+                                    # the turns others opened between them (window_turns:
+                                    # a run of subagent reports or task notices costs no
+                                    # slot). 4 is the production median the old 8-row
+                                    # window held. The current prompt is NOT in this
+                                    # window — it renders as the final
                                     # <turn current_msg="true">.
-    'max_tokens': 600,              # Haiku output cap
+    'window_read_turns': 12,        # turns daemon_hooks reads to find them (3× — the
+                                    # over-fetch the row window used).
+    # Haiku output cap. Thinking counts against it, and a cut-off round
+    # selects nothing, so it holds ~3× the largest medium-effort reply seen
+    # on replayed production prompts (1,442 tokens with thinking).
+    'max_tokens': 4096,
 }
 
 
@@ -357,25 +369,33 @@ def _dedup_candidates(candidates):
     return result
 
 
-def _group_turns(msgs):
-    """Group a flat oldest-first message list into user+assistant turns.
-
-    A user message always opens a new turn; an assistant message closes the
-    open turn or opens its own (lone assistant — e.g. the user half was a
-    filtered wake envelope). No strict-alternation assumption.
-    """
-    groups = []
-    for m in msgs:
-        if m.get('role') == 'user':
-            groups.append({'user': m})
-        elif groups and 'assistant' not in groups[-1]:
-            groups[-1]['assistant'] = m
-        else:
-            groups.append({'assistant': m})
-    return groups
+def _speaker_elements():
+    """The Surface's element per speaker: the operator as <user> (the picker
+    reads the conversation in third person), every other speaker by the
+    name the encoder timeline uses (trace_contract.MACHINE_SPEAKER_ELEMENTS)."""
+    from servers.trace_contract import MACHINE_SPEAKER_ELEMENTS
+    return {'operator': 'user', **MACHINE_SPEAKER_ELEMENTS}
 
 
-def _build_user_content_xml(candidates, user_message, recent_messages,
+def window_turns(turns, cfg=None):
+    """The Surface's conversation window over oldest-first turns: from the
+    cfg['recent_turns']-th last turn the operator spoke in to the newest. The
+    turns others opened between them (a subagent's report, a task notice,
+    another session's message) ride along and cost no slot, so a run of them
+    never pushes the operator's words out of Haiku's view. One policy, read
+    by the hook (window, seen-dedup) and the render."""
+    from servers.trace_contract import row_speaker, turn_incoming
+    want = (cfg or SURFACE)['recent_turns']
+    found = 0
+    for i in range(len(turns) - 1, -1, -1):
+        if any(row_speaker(r) == 'operator' for r in turn_incoming(turns[i])):
+            found += 1
+            if found == want:
+                return turns[i:]
+    return list(turns)
+
+
+def _build_user_content_xml(candidates, user_message, recent_turns,
                             retrieval_stats, frame, cfg,
                             scope=None):
     """v13 XML user content — one grammar, oldest first, current message last.
@@ -395,36 +415,54 @@ def _build_user_content_xml(candidates, user_message, recent_messages,
         frame.strip() if frame
         else '(none — fresh session or Frame unavailable)'))
 
+    from servers.trace_contract import row_speaker, row_text, turn_incoming
+    elements = _speaker_elements()
     lines = ['<conversation>']
     n = 0
-    groups = _group_turns((recent_messages or [])[-(cfg['recent_messages']):])
-    last_assistant_gi = max((i for i, g in enumerate(groups) if g.get('assistant')),
+    turns = window_turns(recent_turns or [], cfg)
+    last_assistant_gi = max((i for i, t in enumerate(turns) if t['assistant']),
                             default=-1)
-    for gi, g in enumerate(groups):
+    for gi, t in enumerate(turns):
+        # What renders: the operator's messages, and the message that opened
+        # a turn someone else started (another session's message, a
+        # background task's notice, a subagent's report), short, under its
+        # speaker's element — so its reply never reads as unprompted. What
+        # rides in with a prompt (the status note on every desktop prompt)
+        # does not.
+        rows = turn_incoming(t)
+        voices = [r for r in rows if row_speaker(r) == 'operator']
+        if rows and row_speaker(rows[0]) != 'operator':
+            voices = [rows[0]] + voices
+        a = t['assistant']
+        if not voices and not a:
+            continue
         n += 1
         lines.append('<turn n="%d">' % n)
-        u = g.get('user')
-        if u:
-            lines.append('<user>%s</user>'
-                         % (u.get('content') or '')[:cfg['user_message_limit']])
-            # Id only: the one rule that reads this element is "its id
-            # appears in any <shown>" (surface_prompt). The title was never
-            # matched, never mentioned — it cost ~93 chars an entry, and it
-            # made the picker compare a cut title against the whole one the
-            # candidate menu renders. Nothing reads it, so nothing pays.
-            for s in (u.get('surfaced') or []):
-                lines.append('<shown id="%s"/>' % str(s.get('id', ''))[:8])
-        a = g.get('assistant')
+        u = voices[0] if voices else None
+        for m in voices:
+            speaker = row_speaker(m)
+            el = elements[speaker]
+            limit = cfg['user_message_limit' if speaker == 'operator'
+                        else 'machine_message_limit']
+            lines.append('<%s>%s</%s>' % (el, row_text(m)[:limit], el))
+        # Id only: the one rule that reads this element is "its id appears in
+        # any <shown>" (surface_prompt). The title was never matched, never
+        # mentioned — it cost ~93 chars an entry, and it made the picker
+        # compare a cut title against the whole one the candidate menu
+        # renders. Nothing reads it, so nothing pays. The opener's list is the
+        # turn's: a turn's messages share its chain, so its surface runs.
+        for s in ((u or {}).get('surfaced') or []):
+            lines.append('<shown id="%s"/>' % str(s.get('id', ''))[:8])
         if a:
             # The most recent assistant message gets its own, larger cap
             # (SURFACE['last_anchor_message_limit']); older assistant turns
-            # are context at 'anchor_message_limit'. Keyed on the last group
+            # are context at 'anchor_message_limit'. Keyed on the last turn
             # that HAS an assistant — an interrupted turn leaves a trailing
             # lone user message, and that must not demote the real last reply.
             a_limit = (cfg.get('last_anchor_message_limit', cfg['anchor_message_limit'])
                        if gi == last_assistant_gi else cfg['anchor_message_limit'])
             lines.append('<assistant>%s</assistant>'
-                         % (a.get('content') or '')[:a_limit])
+                         % row_text(a)[:a_limit])
         lines.append('</turn>')
     n += 1
     lines.append('<turn n="%d" current_msg="true">' % n)
@@ -497,7 +535,7 @@ SURFACE_LAYOUT = 'xml_v13'
 
 
 def build_surface_prompt(candidates, user_message,
-                       recent_messages=None,
+                       recent_turns=None,
                        retrieval_stats=None, frame="", shuffle_seed=None,
                        scope=None):
     """Build the S1 recall surface USER message — per-turn delta only.
@@ -516,9 +554,9 @@ def build_surface_prompt(candidates, user_message,
         candidates: List of candidate node dicts (enriched with metadata)
         user_message: The operator's latest message — rendered as the final
             <turn current_msg="true"> (user only, no reply yet)
-        recent_messages: List of {"role": str, "content": str} — PREVIOUS
-            turns only; the caller excludes the current turn's chain
-            (daemon_hooks passes exclude_trace_id to get_session_turns)
+        recent_turns: PREVIOUS turns only, as brain.conversation_turns
+            returns them ({user, with, assistant, actions}; daemon_hooks
+            ends the read before the current prompt's rows).
         retrieval_stats: Dict with brain_size, top_score, median_score, source_breakdown
         frame: Markdown Frame (Anchor's prior). When non-empty becomes the
             <partnership_context> block. When empty, explicit degraded marker.
@@ -535,12 +573,12 @@ def build_surface_prompt(candidates, user_message,
     candidates = prepare_presented_candidates(candidates, shuffle_seed, cfg)
 
     return _build_user_content_xml(
-        candidates, user_message, recent_messages, retrieval_stats,
+        candidates, user_message, recent_turns, retrieval_stats,
         frame, cfg, scope=scope)
 
 
 # ═══════════════════════════════════════════════════════════════
-# INJECT RENDER POLICY — what the stream reads after Haiku's selection
+# INJECT RENDER POLICY — what the session reads after Haiku's selection
 # ═══════════════════════════════════════════════════════════════
 
 # Seeds first: Haiku's picks are the memories the moment needs. They split
@@ -548,7 +586,7 @@ def build_surface_prompt(candidates, user_message,
 # are peripheral vision, one title line each, after the seeds. A field is
 # shown whole or not at all — a cut names how much is behind it and where
 # to get it, and nothing renders as a stub. The 12-moment audit behind the
-# ruling: content carried the stream's need 21 times and was cut or absent
+# ruling: content carried the session's need 21 times and was cut or absent
 # in 27 of its renders; situation, reasoning and edge descriptions carried
 # it 0 times in 36 blocks.
 
@@ -663,6 +701,67 @@ def seed_render_cfg(mode, scope=None, content_limit=None):
     if scope:
         cfg['scope'] = scope
     return cfg
+
+# ═══════════════════════════════════════════════════════════════
+# TOOL MOMENT — memories at a file's first edit (daemon_hooks.hook_pre_edit)
+# ═══════════════════════════════════════════════════════════════
+
+# At most this many memories per file; recall's relevance floor decides when
+# there are fewer, or none.
+TOOL_MOMENT_MAX_NODES = 4
+
+# Files whose edit recalls nothing. Searched in the cue path, which is
+# relative to the session's working directory when the file is under it. The
+# first three are an agent's own working files: their paths are a temp root,
+# a project slug, a session id or a random name, not the work, so recall
+# matches those words and shows unrelated memories (worktree recycling,
+# release history), as their tool_shown rows show. The rest are files nobody
+# writes by hand, or data.
+TOOL_MOMENT_SKIP = re.compile(r'''
+    ^(/private)?/(tmp|var/tmp|var/folders)/          # system temp, a session's scratchpad too
+  | (^|/)\.claude[^/]*/(projects/[^/]+/memory|plans)/  # Claude Code's file memory and plans
+  | (^|/)side-session-notes/                         # notes the desktop app's linked sessions share
+  | (^|/)(node_modules|\.?venv|site-packages|__pycache__)/
+  | \.(log|map|lock)$
+  | (^|/)(?!package\.json$)[^/]*\.json$              # data; package.json is source
+''', re.X)
+
+# Title, some content, corrections. The header carries the id, the age
+# (created, revised) and the locked / ⚠ status. The cut is a bare '…' at a
+# sentence boundary: the moment fires on every file the agent edits, and a
+# '(+N chars: get_nodes)' pointer on each would be read hundreds of times a
+# session for nothing.
+TOOL_MOMENT_FORMAT = {
+    'content_limit': 300,
+    'content_cut': 'sentence',
+    'content_cut_marker': '…',
+    'metadata_limit': META_NONE,
+    'edge_limit': 0,
+    'correction_render': 'lean',
+    'correction_limit': SURFACE_CORRECTION_LIMIT,
+    'time_format': 'relative',
+    'show_confidence': False,
+    'show_encoding_source': False,
+    'mark_status': True,
+    'extra_skip_keys': SURFACE_SKIP_KEYS,
+}
+
+
+def render_tool_inject(nodes, path, scope=None):
+    """The tool moment's inject: one line naming the file, then each memory,
+    the most recently revised first. `nodes` are canonical pulls (get_node);
+    '' when there are none."""
+    if not nodes:
+        return ''
+    from servers.contract import render_rich_node
+    cfg = dict(TOOL_MOMENT_FORMAT)
+    if scope:
+        cfg['scope'] = scope
+    ordered = sorted(
+        nodes, key=lambda n: n.get('revised_at') or n.get('created_at') or '',
+        reverse=True)
+    return '\n\n'.join(['Memories about %s:' % path]
+                       + [render_rich_node(n, cfg) for n in ordered])
 
 # ═══════════════════════════════════════════════════════════════
 # PICKER RENDER — what Haiku reads when selecting a few from 25
@@ -1566,7 +1665,7 @@ def render_surface_inject(node_activation, field_activation, rich_nodes,
     least valuable end (the neighbor list, then edges, then content to the
     minimum, then the lowest seeds) and never mid-line.
 
-    `seen_ids`: nodes already shown to this stream in the window — never a
+    `seen_ids`: nodes already shown to this session in the window — never a
     neighbor line (they are in context already).
     """
     selected_mode = selected_mode or {}

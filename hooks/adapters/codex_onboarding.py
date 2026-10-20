@@ -1,18 +1,16 @@
-"""Codex setup: inspect hooks, save consented tool policy, open native review.
+"""Codex setup: inspect hooks, save consented tool policy.
 
-No Entity imports, brain access, hook execution, hook-trust writes, or approval
-keystrokes. The MCP caller owns consent before approve_tools/open_review.
+No Entity imports, brain access, hook execution, or hook-trust writes. The MCP
+caller owns consent before approve_tools.
 """
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import selectors
-import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 
@@ -20,14 +18,40 @@ class ReviewError(RuntimeError):
     pass
 
 
+# Trust states under which Codex runs a hook; every other state awaits review.
+TRUSTED = ('trusted', 'managed')
+
+
+def awaiting_review(hooks):
+    """Enabled hooks Codex will not run until the user approves them."""
+    return [h for h in hooks if h['enabled'] is True and h['trustStatus'] not in TRUSTED]
+
+
+# Desktop bundles that ship a codex CLI, in preference order.
+APP_RESOURCES = (
+    '/Applications/ChatGPT.app/Contents/Resources',
+    '/Applications/Codex.app/Contents/Resources',
+    str(Path.home() / 'Applications/ChatGPT.app/Contents/Resources'),
+)
+
+
+def bundled_codex_candidates(resources_dirs=None):
+    """Where each desktop bundle keeps its codex CLI. ChatGPT.app 26.928 moved
+    it under codex-cli/, whose codex-package.json names the entrypoint
+    (bin/codex); earlier apps shipped it flat as Resources/codex."""
+    for resources in resources_dirs or APP_RESOURCES:
+        resources = Path(resources)
+        try:
+            entrypoint = json.loads((resources / 'codex-cli/codex-package.json').read_text())['entrypoint']
+        except (OSError, ValueError, KeyError, TypeError):
+            entrypoint = 'bin/codex'
+        yield str(resources / 'codex-cli' / entrypoint)
+        yield str(resources / 'codex')
+
+
 def find_codex(executable=None):
     """Prefer the desktop's bundled runtime to a possibly different PATH CLI."""
-    candidates = [executable] if executable else [
-        '/Applications/ChatGPT.app/Contents/Resources/codex',
-        '/Applications/Codex.app/Contents/Resources/codex',
-        str(Path.home() / 'Applications/ChatGPT.app/Contents/Resources/codex'),
-        shutil.which('codex'),
-    ]
+    candidates = [executable] if executable else [*bundled_codex_candidates(), shutil.which('codex')]
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return str(Path(candidate).absolute())
@@ -105,10 +129,11 @@ def summarize_hooks(reply, plugin_root=None):
             except (KeyError, ValueError):
                 continue
         hooks.append({key: hook.get(key) for key in
-                      ('key', 'pluginId', 'eventName', 'enabled', 'trustStatus', 'currentHash')})
-    pending = [h for h in hooks if h['trustStatus'] not in ('trusted', 'managed')]
+                      ('key', 'pluginId', 'eventName', 'command', 'matcher', 'enabled',
+                       'trustStatus', 'currentHash')})
+    pending = [h for h in hooks if h['trustStatus'] not in TRUSTED]
     disabled = [h for h in hooks if h['enabled'] is not True]
-    state = ('not_found' if not hooks else 'review_required' if any(h['enabled'] is True for h in pending) else
+    state = ('not_found' if not hooks else 'review_required' if awaiting_review(hooks) else
              'disabled' if disabled else 'definitions_trusted')
     return {'state': state, 'trust_complete': bool(hooks) and not pending and not disabled,
             'hooks': hooks, 'review_count': len(pending), 'disabled_count': len(disabled),
@@ -117,10 +142,10 @@ def summarize_hooks(reply, plugin_root=None):
 
 
 @contextmanager
-def _connection(*, executable=None, codex_home=None, cwd=None):
+def _connection(*, executable=None, codex_home=None, cwd=None, timeout=12):
     home = Path(codex_home or os.environ.get('CODEX_HOME') or Path.home() / '.codex').absolute()
     directory = Path(cwd or Path.home()).absolute()
-    client = _Client(find_codex(executable), home, directory)
+    client = _Client(find_codex(executable), home, directory, timeout)
     try:
         client.call('initialize', {'clientInfo': {'name': 'entity-setup', 'version': '1'},
                                    'capabilities': {'experimentalApi': True}})
@@ -181,43 +206,10 @@ def approve_tools(*, plugin_root, plugin_id, **host):
                 'message': 'Entity-wide tool approval is saved. Individual restrictions remain. An existing Codex connection may need to reload before using the new setting.'}
 
 
-def review_script(executable, codex_home, cwd):
-    """A terminal receives the exact host configuration inspected by setup_status."""
-    command = shlex.join([str(executable), '--no-alt-screen', '--cd', str(cwd)])
-    return ('#!/bin/sh\n'
-            'printf "%s\\n" "Entity automatic memory — Codex hook review" '
-            '"Choose Review hooks in Codex and approve only the hooks you intend to run." '
-            '"Codex may first ask you to confirm the working directory." '
-            '"When finished, close this window and return to Entity setup to check again."\n'
-            'export CODEX_HOME=' + shlex.quote(str(codex_home)) + '\n'
-            'exec ' + command + '\n')
-
-
-def open_review(*, executable=None, codex_home=None, cwd=None):
-    """Launch native Codex after the caller obtains explicit user consent.
-
-    macOS opens a .command document in Terminal. Other hosts get manual
-    instructions. No input is sent to Codex, even if its startup UI changes.
-    """
-    if sys.platform != 'darwin':
-        raise ReviewError('Automatic review launch is available on macOS. Open Codex CLI to review Entity hooks on this operating system.')
-    binary = find_codex(executable)
-    home = Path(codex_home or os.environ.get('CODEX_HOME') or Path.home() / '.codex').absolute()
-    directory = Path(cwd or Path.home()).absolute()
-    # Terminal reads this document after launch; the OS temp directory owns its
-    # lifetime. It contains paths and no credentials.
-    folder = Path(tempfile.mkdtemp(prefix='entity-hook-review-'))
-    path = folder / 'Review Entity hooks.command'
-    path.write_text(review_script(binary, home, directory))
-    path.chmod(0o700)
+if __name__ == '__main__':
+    # The one owner of the codex lookup: scripts/codex-install.sh asks here.
+    # Usage: codex_onboarding.py [--codex /path]  → prints the executable.
     try:
-        result = subprocess.run(['/usr/bin/open', '-a', 'Terminal', str(path)],
-                                env={**os.environ, 'CODEX_HOME': str(home)},
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=8, check=False)
-        if result.returncode:
-            raise ReviewError('Could not open Codex hook review. Your hook permissions were not changed.')
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ReviewError('Could not open Codex hook review. Your hook permissions were not changed.') from error
-    return {'state': 'review_launched', 'trust_granted': False,
-            'message': 'Complete the review in Codex, then check Entity setup again. Opening the review does not grant permission.'}
+        print(find_codex(sys.argv[2] if sys.argv[1:2] == ['--codex'] else None))
+    except ReviewError as error:
+        sys.exit(str(error))

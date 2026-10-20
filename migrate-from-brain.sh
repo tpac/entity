@@ -235,10 +235,12 @@ _py() { python3 -c "$PYLIB" "$@"; }
 REAL_HOME="$(_py home)"
 SANDBOXED=0; [ "$(cd "$HOME" 2>/dev/null && pwd -P)" = "$(cd "$REAL_HOME" 2>/dev/null && pwd -P)" ] || SANDBOXED=1
 
-# The CLI, or the copy the desktop app bundles when none is on PATH.
+# The CLI, or the copy the desktop app bundles when none is on PATH: under
+# claude-code/<version>/, directly or one folder deeper (<version>/<id>/).
 CLAUDE="$(command -v claude 2>/dev/null || true)"
 if [ -z "$CLAUDE" ]; then
-  CLAUDE="$(ls -d "$HOME/Library/Application Support/Claude/claude-code/"*/claude.app/Contents/MacOS/claude 2>/dev/null | sort -V | tail -1)"
+  _desk="$HOME/Library/Application Support/Claude/claude-code"
+  CLAUDE="$(ls -d "$_desk/"*/claude.app/Contents/MacOS/claude "$_desk/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | sort -V | tail -1)"
 fi
 
 _in()     { local x="$1" e; shift; for e in "$@"; do [ "$e" = "$x" ] && return 0; done; return 1; }

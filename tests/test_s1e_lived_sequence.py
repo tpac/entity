@@ -2,8 +2,8 @@
 
 Verifies the A/B flag's two arms (docs/S1-SCRIBE-REDESIGN.md §10.3.1):
   - OFF → the markdown messages-only timeline (control), byte-identical to before.
-  - ON  → the XML lived sequence (messages + tool actions interleaved), read via
-          the existing recall_episodes door, grouped into turns by timestamp.
+  - ON  → the XML lived sequence (messages + tool actions interleaved), read
+          through brain.conversation_turns (encode._window), grouped into turns.
 
 Both the renderer alone and the ASSEMBLED body (through _build_user_content, where
 the <timeline> wrapper and its `now=` stamp are added) — a renderer that works but
@@ -22,8 +22,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from servers.brain_traces import BrainTracesMixin  # noqa: E402
+from servers.trace_contract import group_turns, row_text  # noqa: E402
 from servers.scales.s1.encode import (  # noqa: E402
-    _render_lived_sequence_timeline, _xml_escape, _build_user_content,
+    _render_lived_sequence_timeline, _window, _xml_escape, _build_user_content,
 )
 
 
@@ -32,26 +34,54 @@ class _StubNodes:
         return 'Title-' + rid
 
 
+def _no_selections(chains, **kwargs):
+    return {}, {}
+
+
 class _StubBrain:
-    """Feeds recall_episodes a fixed episode list; serves get_title."""
-    def __init__(self, episodes):
+    """Feeds recall_episodes a fixed episode list, read by the real
+    conversation_turns; serves get_title. No earlier encode unless an anchor
+    is given."""
+    conversation_turns = BrainTracesMixin.conversation_turns
+
+    def __init__(self, episodes, anchor=''):
         self._episodes = episodes
         self._nodes = _StubNodes()
+        self._anchor = anchor
+        self._trace_dal = SimpleNamespace(get_by_ids=lambda ids: [],
+                                          recall_chain_selections=_no_selections)
+        self.errors = []
+
+    def last_encode_anchor(self, session_id, older_than=None):
+        return self._anchor
+
+    def _log_error(self, source, exc, context=''):
+        self.errors.append((source, str(exc), context))
 
     def recall_episodes(self, **kwargs):
-        # Honor the ref_type whitelist the caller passes, like the real one.
+        # Honor the ref_type whitelist and the older_than cut the caller
+        # passes, like the real one.
         rts = kwargs.get('ref_type') or []
         eps = [e for e in self._episodes if e.get('ref_type') in rts] if rts else self._episodes
+        if kwargs.get('older_than'):
+            eps = [e for e in eps if e['created_at'] < kwargs['older_than']]
         return {'episodes': eps, 'ranked_by': 'time', 'truncated': False}
 
+    def speaker_for(self, session_id, ref_type):
+        # An install that declares no counterpart: no speaker is named.
+        return ''
 
-def _ep(rt, summary, ts, tid, tool=None, content=None):
+
+def _ep(rt, summary, ts, tid, tool=None, content=None, chain=None):
     # Real message traces store the capped body in metadata['content'] and a
     # 200-char display `summary`; tool_result traces store only the cue in summary.
     meta = {'tool': tool} if tool else {}
     if content is not None:
         meta['content'] = content
-    return {'id': tid, 'ref_type': rt, 'summary': summary, 'created_at': ts, 'metadata': meta}
+    ep = {'id': tid, 'ref_type': rt, 'summary': summary, 'created_at': ts, 'metadata': meta}
+    if chain is not None:
+        ep['chain_id'] = chain
+    return ep
 
 
 # Two turns: turn 1 (lock fix) edits a file; turn 2 (run tests) runs bash.
@@ -69,18 +99,9 @@ EPISODES = [
     _ep('assistant_message', '12 passed', '2026-06-29T00:00:06', 'a2', content='12 passed'),
 ]
 
-# The control-arm messages for the same two turns (drives window-match + OFF path).
-MESSAGES = [
-    {'role': 'user', 'content': 'the recall keeps locking', 'id': 'turn1', 'trace_id': 'u1', 'judge_output': ''},
-    {'role': 'assistant', 'content': 'found it — bg writer holds the lock', 'trace_id': 'a1'},
-    {'role': 'user', 'content': 'run the tests', 'id': 'turn2', 'trace_id': 'u2', 'judge_output': ''},
-    {'role': 'assistant', 'content': '12 passed', 'trace_id': 'a2'},
-]
-
-
 def test_lived_sequence_interleaves_actions_into_turns():
     brain = _StubBrain(EPISODES)
-    out = _render_lived_sequence_timeline(brain, 'sess', MESSAGES)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(brain, 'sess'))
 
     assert out.count('<turn n="') == 2
     assert '<turn n="1">' in out and '<turn n="2">' in out
@@ -98,7 +119,7 @@ def test_messages_render_full_content_not_summary():
     # Regression guard for the code-review HIGH finding: render metadata['content']
     # (full), NOT the 200-char `summary`. The content-only suffix must appear.
     brain = _StubBrain(EPISODES)
-    out = _render_lived_sequence_timeline(brain, 'sess', MESSAGES)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(brain, 'sess'))
     assert 'can you check the wal-index path?' in out          # content-only, not in summary
     assert 'holds the lock through the whole batch' in out     # content-only, not in summary
 
@@ -107,7 +128,6 @@ def test_messages_render_full_content_not_summary():
 def test_episode_bodies_survive_store_gather_and_timeline(body_length):
     """Keep long messages and the store's overflow marker through S1 assembly."""
     from servers.brain_traces import _s0_trace
-    from servers.scales.s1.encode import _gather_messages
     from servers.session_context import SessionContext
 
     episodes = []
@@ -120,10 +140,8 @@ def test_episode_bodies_survive_store_gather_and_timeline(body_length):
         return tid
 
     brain = _StubBrain(episodes)
-    brain._trace_dal = SimpleNamespace(append=append)
-    brain.get_conversation = lambda *a, **kw: [
-        {'role': role, 'content': ep['metadata']['content'], 'trace_id': ep['id']}
-        for role, ep in zip(('user', 'assistant'), episodes)]
+    brain._trace_dal = SimpleNamespace(append=append, get_by_ids=lambda ids: [],
+                                       recall_chain_selections=_no_selections)
     ctx = SessionContext(session_id='episode-fidelity')
     bodies = ['q' * 7990 + 'USER_TAIL!', 'a' * 7990 + 'ASST_TAIL!']
     # Both bodies have exactly 8,000 characters before optional overflow.
@@ -131,14 +149,14 @@ def test_episode_bodies_survive_store_gather_and_timeline(body_length):
         _s0_trace(brain, ctx, event_type='delta', ref_type=ref_type,
                   summary='short excerpt', content=body + 'z' * (body_length - 8000))
 
-    messages = _gather_messages(brain, ctx.session_id)
-    for body, message in zip(bodies, messages):
+    turns = _window(brain, ctx.session_id)
+    for body, row in zip(bodies, (turns[0]['user'], turns[0]['assistant'])):
         expected = body
         if body_length > 8000:
             expected += ' …[+500 chars truncated at trace store]'
-        assert message['content'] == expected
+        assert row_text(row) == expected
         assert _xml_escape(expected) in _render_lived_sequence_timeline(
-            brain, ctx.session_id, messages)
+            brain, ctx.session_id, turns)
 
 
 def test_lived_sequence_escapes_xml():
@@ -150,9 +168,8 @@ def test_lived_sequence_escapes_xml():
         _ep('tool_result', 'Grep: <svg.*> in . && echo done', '2026-06-29T00:00:02', 't1', 'Grep'),
         _ep('assistant_message', 'a', '2026-06-29T00:00:03', 'a1', content='use a < b'),
     ]
-    msgs = [{'role': 'user', 'content': 'q', 'id': 'turn1', 'trace_id': 'u1', 'judge_output': ''},
-            {'role': 'assistant', 'content': 'a', 'trace_id': 'a1'}]
-    out = _render_lived_sequence_timeline(_StubBrain(eps), 'sess', msgs)
+    brain = _StubBrain(eps)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(brain, 'sess'))
     # raw angle brackets/ampersands from CONTENT must not appear unescaped
     assert '< y &&' not in out and '> b' not in out
     assert '<svg.*>' not in out
@@ -167,14 +184,213 @@ def test_xml_escape_helper():
     assert _xml_escape(None) == ''
 
 
-def test_lived_sequence_window_matches_control_turn_count():
-    # messages cover 2 user turns → only the last 2 turns render even if more exist.
-    extra = [_ep('user_message', 'old turn', '2026-06-28T00:00:00', 'u0', content='old turn'),
-             _ep('assistant_message', 'old reply', '2026-06-28T00:00:01', 'a0', content='old reply')] + EPISODES
-    brain = _StubBrain(extra)
-    out = _render_lived_sequence_timeline(brain, 'sess', MESSAGES)
-    assert out.count('<turn n="') == 2          # trimmed to control's 2 turns
-    assert 'old turn' not in out                # the oldest turn dropped
+def _old_turns(n):
+    eps = []
+    for i in range(n):
+        eps += [_ep('user_message', 'old %d' % i, '2026-06-28T00:00:%02d' % (2 * i),
+                    'u0%d' % i, content='old turn %d' % i),
+                _ep('assistant_message', 'r', '2026-06-28T00:00:%02d' % (2 * i + 1),
+                    'a0%d' % i, content='old reply %d' % i)]
+    return eps
+
+
+def test_window_holds_the_turns_since_the_last_encode_plus_context():
+    # The last encode started before EPISODES' two turns: both are new, and
+    # window_context_turns (2) already-encoded turns before them ride along.
+    brain = _StubBrain(_old_turns(3) + EPISODES, anchor='2026-06-28T12:00:00')
+    turns = _window(brain, 'sess')
+    assert [t['user']['id'] for t in turns] == ['u01', 'u02', 'u1', 'u2']
+    out = _render_lived_sequence_timeline(brain, 'sess', turns)
+    assert out.count('<turn n="') == 4 and 'old turn 0' not in out
+    assert brain.errors == []
+
+
+def test_nothing_new_since_the_last_encode_is_an_empty_window():
+    brain = _StubBrain(EPISODES, anchor='2026-06-30T00:00:00')
+    assert _window(brain, 'sess') == []
+
+
+def test_a_message_typed_after_the_anchor_makes_its_turn_new():
+    # The encode started inside turn 2 (after u2, before the reply); the
+    # operator then typed into that turn. Its turn is new, turn 1 is context.
+    import copy
+    eps = copy.deepcopy(EPISODES) + [_ep('user_message', 'also this', '2026-06-29T00:00:05.5',
+                                         'u3', content='also this', chain='s0-sess-1')]
+    for e in eps:
+        if e['id'] in ('u2', 'u3'):
+            e['chain_id'] = 's0-sess-1'
+            e['metadata']['host_turn'] = 'p2'
+    brain = _StubBrain(eps, anchor='2026-06-29T00:00:04.5')
+    turns = _window(brain, 'sess')
+    assert [t['user']['id'] for t in turns] == ['u1', 'u2']
+    assert [r['id'] for r in turns[1]['with']] == ['u3']
+
+
+def test_the_window_as_of_an_earlier_instant():
+    calls = []
+
+    class _Asof(_StubBrain):
+        def last_encode_anchor(self, session_id, older_than=None):
+            calls.append(older_than)
+            return ''
+    brain = _Asof(EPISODES)
+    turns = _window(brain, 'sess', older_than='2026-06-29T00:00:03.5')
+    assert calls == ['2026-06-29T00:00:03.5']
+    assert [t['user']['id'] for t in turns] == ['u1']
+
+
+def test_first_encode_reads_every_turn():
+    brain = _StubBrain(_old_turns(3) + EPISODES)
+    assert len(_window(brain, 'sess')) == 5
+
+
+def test_a_backlog_past_the_cap_keeps_the_newest_turns_loudly():
+    from unittest.mock import patch
+    from servers.scales.s1.encode_contract import ENCODING_AGENT
+    brain = _StubBrain(_old_turns(3) + EPISODES, anchor='2026-06-27T00:00:00')
+    with patch.dict(ENCODING_AGENT, {'window_max_turns': 3}):
+        turns = _window(brain, 'sess')
+    assert [t['user']['id'] for t in turns] == ['u02', 'u1', 'u2']
+    (source, _exc, context), = brain.errors
+    assert source == 's1e_window_capped' and '2 unencoded turns left out' in context
+
+
+# ── incoming speakers (trace_contract.INCOMING_SPEAKERS) ──
+
+def test_every_incoming_speaker_has_a_timeline_element():
+    from servers.scales.s1.encoder_view import SPEAKER_ELEMENTS
+    from servers.trace_contract import INCOMING_SPEAKERS
+    assert set(SPEAKER_ELEMENTS) == set(INCOMING_SPEAKERS.values())
+    assert SPEAKER_ELEMENTS['operator'] == 'other'   # the prompt's partner
+
+
+def _row(rt, tid, chain, n, content, turn=None):
+    ep = _ep(rt, content, '2026-06-29T00:00:%02d' % n, tid, content=content,
+             chain='s0-sess-%d' % chain)
+    if turn:   # the host's name for the turn, as the write door stamps it
+        ep['metadata']['host_turn'] = turn
+    return ep
+
+
+# Row shapes as a dial-on daemon writes them (seed-arm run 2026-10-10): a
+# first-prompt delivery shares the operator prompt's chain; a Stop delivery
+# opens the successor chain, and a composed Stop block puts the stream row and
+# the brain row on that one chain.
+SPEAKER_SCENARIOS = {
+    'prompt_delivery_joins_the_operator_turn': (
+        [_row('user_message', 'u1', 0, 1, 'where were we?'),
+         _row('thalamus_delivery', 'd1', 0, 2, 'the nightly backup did not run'),
+         _row('assistant_message', 'a1', 0, 3, 'on the lock fix; checking the backup')],
+        [['<other trace="u1">', '<brain trace="d1">', '<me trace="a1">']]),
+    'stop_delivery_opens_its_own_turn': (
+        [_row('user_message', 'u1', 0, 1, 'run the tests'),
+         _row('assistant_message', 'a1', 0, 2, '12 passed'),
+         _row('thalamus_delivery', 'd1', 1, 3, 'rerun the soak test'),
+         _row('assistant_message', 'a2', 1, 4, 'starting the soak test')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<brain trace="d1">', '<me trace="a2">']]),
+    'composed_stop_block_is_one_turn': (
+        [_row('user_message', 'u1', 0, 1, 'ship it'),
+         _row('assistant_message', 'a1', 0, 2, 'merging'),
+         _row('self_message', 's1', 1, 3, 'other session says: hold your merge'),
+         _row('thalamus_delivery', 'd1', 1, 4, 'the soak test is still running'),
+         _row('assistant_message', 'a2', 1, 5, 'holding the merge')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<session trace="s1">', '<brain trace="d1">', '<me trace="a2">']]),
+    'interrupted_operator_prompts_stay_two_turns': (
+        [_row('user_message', 'u1', 0, 1, 'delete the old folder'),
+         _row('user_message', 'u2', 0, 2, 'wait, list it first'),
+         _row('assistant_message', 'a1', 0, 3, 'listed, nothing deleted')],
+        [['<other trace="u1">'], ['<other trace="u2">', '<me trace="a1">']]),
+    # The host names each prompt's turn: after an interrupt the next prompt is
+    # a new turn on the same chain; a message typed mid-turn is absorbed into
+    # the running turn and carries its name, so my reply answers both.
+    'interrupted_turn_the_host_named_apart_stays_two_turns': (
+        [_row('user_message', 'u1', 0, 1, 'delete the old folder', turn='p1'),
+         _row('user_message', 'u2', 0, 2, 'wait, list it first', turn='p2'),
+         _row('assistant_message', 'a1', 0, 3, 'listed, nothing deleted')],
+        [['<other trace="u1">'], ['<other trace="u2">', '<me trace="a1">']]),
+    'message_absorbed_mid_turn_joins_its_turn': (
+        [_row('user_message', 'u1', 0, 1, 'look into the grouping code', turn='p1'),
+         _row('user_message', 'u2', 0, 2, 'also check the Surface window', turn='p1'),
+         _row('assistant_message', 'a1', 0, 3, 'both readers share one rule now')],
+        [['<other trace="u1">', '<other trace="u2">', '<me trace="a1">']]),
+    # A Stop-hook continuation keeps the host's turn across the Stop, but the
+    # Stop closed the turn: a message typed during the continuation is on the
+    # successor chain and opens its own turn, so each reply keeps its prompt.
+    'message_in_a_continuation_after_a_stop_opens_its_own_turn': (
+        [_row('user_message', 'u1', 0, 1, 'run the migration', turn='p1'),
+         _row('assistant_message', 'a1', 0, 2, 'migration done'),
+         _row('user_message', 'u2', 1, 3, 'and the backfill too', turn='p1'),
+         _row('assistant_message', 'a2', 1, 4, 'backfill done')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<other trace="u2">', '<me trace="a2">']]),
+    # The prompt hook writes the operator's text first, then the reminder it
+    # cut out, on the same chain — the reminder rides in the operator's turn.
+    'glued_reminder_rides_in_the_operator_turn': (
+        [_row('user_message', 'u1', 0, 1, 'the test fails'),
+         _row('env_message', 'e1', 0, 2, 'You are operating in a git worktree.'),
+         _row('assistant_message', 'a1', 0, 3, 'fixed it')],
+        [['<other trace="u1">', '<harness trace="e1">', '<me trace="a1">']]),
+    # A subagent's report and a task notice each arrive as their own prompt:
+    # each opens a turn that holds my reply to it.
+    'subagent_report_opens_its_own_turn': (
+        [_row('user_message', 'u1', 0, 1, 'audit the branch'),
+         _row('assistant_message', 'a1', 0, 2, 'delegated the audit'),
+         _row('subagent_message', 'r1', 1, 3, 'two findings, both fixed'),
+         _row('assistant_message', 'a2', 1, 4, 'read the report')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<subagent trace="r1">', '<me trace="a2">']]),
+    # Two hand-backs in one prompt are two rows on one chain: the second
+    # rides in the first's turn, each under its own element.
+    'two_reports_in_one_prompt_share_a_turn': (
+        [_row('user_message', 'u1', 0, 1, 'get two reviews'),
+         _row('assistant_message', 'a1', 0, 2, 'two reviewers are on it'),
+         _row('subagent_message', 'r1', 1, 3, 'blocking: batch the backfill'),
+         _row('subagent_message', 'r2', 1, 4, 'no blocking issues'),
+         _row('assistant_message', 'a2', 1, 5, 'the reviewers disagree')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<subagent trace="r1">', '<subagent trace="r2">', '<me trace="a2">']]),
+    'task_notice_opens_its_own_turn': (
+        [_row('user_message', 'u1', 0, 1, 'run the suite in the background'),
+         _row('assistant_message', 'a1', 0, 2, 'started'),
+         _row('env_message', 'n1', 1, 3, 'background command completed'),
+         _row('assistant_message', 'a2', 1, 4, 'suite is green')],
+        [['<other trace="u1">', '<me trace="a1">'],
+         ['<harness trace="n1">', '<me trace="a2">']]),
+}
+
+
+def test_the_partner_is_named_and_other_voices_are_not():
+    class _Named(_StubBrain):
+        def speaker_for(self, session_id, ref_type):
+            return 'Sam "S" <P>' if ref_type == 'user_message' else ''
+    eps, _ = SPEAKER_SCENARIOS['glued_reminder_rides_in_the_operator_turn']
+    brain = _Named(eps)
+    out = _render_lived_sequence_timeline(brain, 'sess', _window(brain, 'sess'))
+    assert '<other name="Sam &quot;S&quot; &lt;P&gt;" trace="u1">' in out   # escaped as an attribute
+    assert '<harness trace="e1">' in out
+
+
+@pytest.mark.parametrize('name', sorted(SPEAKER_SCENARIOS))
+def test_the_turn_rule_groups_the_timeline(name):
+    # The turn rule (trace_contract.joins_open_turn) for every speaker, dial-on
+    # ones simulated by widening the lived read's whitelist as a flip would.
+    from unittest.mock import patch
+    import servers.trace_contract as tc
+    eps, expected = SPEAKER_SCENARIOS[name]
+    brain = _StubBrain(eps)
+    flipped = ('thalamus_delivery', 'self_message')
+    with patch.object(tc, 'CONVERSATIONAL_REF_TYPES', tc.CONVERSATIONAL_REF_TYPES + flipped), \
+            patch.object(tc, 'SAID_AND_DID_REF_TYPES', tc.SAID_AND_DID_REF_TYPES + flipped):
+        out = _render_lived_sequence_timeline(brain, 'sess', _window(brain, 'sess'))
+
+    turns = out.split('</turn>')[:-1]
+    assert len(turns) == len(expected)
+    for turn, tags in zip(turns, expected):
+        positions = [turn.index(tag) for tag in tags]       # each present…
+        assert positions == sorted(positions)                # …in this order
+        assert turn.count(' trace="') == len(tags)           # and nothing else
 
 
 # ── the assembled body (_build_user_content wraps + stamps the render) ──
@@ -202,8 +418,9 @@ def _assembly_brain():
 def _assemble(view_now):
     # precomputed=('', set(), None) skips _build_catalog — the catalog has its own
     # tests; this one is about the timeline surviving assembly.
+    brain = _assembly_brain()
     _pre, body, _cat, _ids = _build_user_content(
-        _assembly_brain(), MESSAGES, counter=2, session_id='sess',
+        brain, _window(brain, 'sess'), counter=2, session_id='sess',
         precomputed=('', set(), None),
         view_policy=True, view_now=view_now)
     return body
@@ -246,15 +463,15 @@ def test_assembled_timeline_degrades_to_bare_tag_when_unstampable():
     assert 'Edit: servers/dal.py' in inner
 
 
-def test_lived_read_failure_fails_the_render():
+def test_lived_read_failure_fails_the_window():
     # No fallback: the timeline IS the encoder's input, so a failed trace read
-    # raises out of the render and fails the run (the runner logs it; the turns
-    # retry) instead of encoding from a substitute.
+    # raises out of the window read and fails the run (the runner logs it; the
+    # turns retry) instead of encoding from a substitute.
     class _BrokenEpisodes(_StubBrain):
         def recall_episodes(self, **kwargs):
             raise RuntimeError('trace read failed')
     with pytest.raises(RuntimeError, match='trace read failed'):
-        _render_lived_sequence_timeline(_BrokenEpisodes([]), 'sess', MESSAGES)
+        _window(_BrokenEpisodes([]), 'sess')
 
 
 def test_system_prompt_injects_arc_review_and_closure():

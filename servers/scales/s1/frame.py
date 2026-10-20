@@ -40,7 +40,7 @@ def _render_session_header(brain, session_id: str, at=None) -> str:
                     is wall-clock; REPLAYS MUST PASS `at` (get_frame/
                     build_frame thread it) — conversation_now(brain=) alone
                     cannot see a replay's injected date.
-      Worktree    — parallel-stream confusion: which checkout this stream
+      Worktree    — parallel-session confusion: which checkout this session
                     is acting on (only rendered when in one).
 
     Declaration and marks cannot drift: the Project/Counterpart lines render

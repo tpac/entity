@@ -31,6 +31,7 @@ structurally impossible.
 import os
 
 from servers.contract import META_DEEP, META_NONE, NODE_REF_SEP
+from servers.trace_contract import MACHINE_SPEAKER_ELEMENTS
 
 
 def view_policy_enabled():
@@ -305,7 +306,8 @@ ROLLUP_TOOLS_CAP = 6
 ROLLUP_SUBS_CAP = 4
 
 # Only supported recorded vocabulary versions may drive normalized behavior.
-SUPPORTED_ACTION_VOCAB_VERSIONS = frozenset({1})
+# 2 changed what prompt envelopes mean, not what a tool kind means.
+SUPPORTED_ACTION_VOCAB_VERSIONS = frozenset({1, 2})
 
 
 def action_mode(tool_name):
@@ -348,30 +350,37 @@ def actions_stub_line(n_actions):
             'them in a previous run' % n_actions)
 
 
+# ── Speaker elements ──
+
+# The timeline element each incoming speaker (trace_contract.INCOMING_SPEAKERS)
+# renders as. The operator keeps <other> — the prompt's partner, whose words
+# the voice fields quote, named by brain.speaker_for; every other speaker
+# renders as its shared element (trace_contract.MACHINE_SPEAKER_ELEMENTS, the
+# Surface's names too), so "not my partner" is structural rather than a
+# per-value exception.
+SPEAKER_ELEMENTS = {'operator': 'other', **MACHINE_SPEAKER_ELEMENTS}
+
+
 # ── Provenance verb split ──
 
 # Node-op categories rendered per turn when the policy is on, replacing the
 # merged `encoded(me)` (= created∪revised) with the verbs, plus the
 # categories the merged form dropped. Labels use the timeline's identity
-# vocabulary — (me), matching <me>/<other>. Each entry
-# is (label, link-keys): recalled(me) merges the by-id reads (`recalled`,
-# catalog-folded) with the search-tool results (`looked_up`, provenance-only)
-# into ONE line — the reader's question is "what did I look at", not which
-# tool answered it. Keys match nodes_for_traces' link dict; the substrate
-# (anchor_touched → ANCHOR_TOUCHED_KEYS) has kept them separate all along.
-# Third element: render the node's TITLE beside its id, or the id alone.
-# Measured 2026-09-16 over 26 captured payloads — how often a provenance id
-# also has a full catalog entry above, which is the only reason to repeat its
-# title here: revised 100%, encoded 94%, created 94% — but recalled only 43%
-# and surfaced 64%. So the write verbs point at bodies the reader already has
-# and cost nothing but the id; the read verbs point at nodes that are often
-# nowhere else in the prompt, and a bare id there is the dangling reference
-# that makes a reader mint a twin instead of cross-referencing.
+# vocabulary — (me), matching <me>/<other>. Each entry is
+# (label, link-keys, minus-keys): recalled(me) is what I read by id
+# (get_node/get_nodes → `recalled`); searched(me) is what my searches
+# returned (`looked_up`) minus what I also read by id, so a node I searched
+# up and then opened shows once, as a read. Keys match nodes_for_traces'
+# link dict (anchor_touched → ANCHOR_TOUCHED_KEYS).
+# Whether a ref carries its title is not a property of the verb: the
+# timeline render shows a title only for a node with no catalog entry
+# (encode._render_lived_sequence_timeline), one rule for every verb.
 PROVENANCE_SPLIT = (
-    ('created(me)',  ('created',),                 False),
-    ('revised(me)',  ('revised',),                 False),
-    ('recalled(me)', ('recalled', 'looked_up'),    True),
-    ('archived(me)', ('archived',),                True),
+    ('created(me)',  ('created',),   ()),
+    ('revised(me)',  ('revised',),   ()),
+    ('recalled(me)', ('recalled',),  ()),
+    ('searched(me)', ('looked_up',), ('recalled',)),
+    ('archived(me)', ('archived',),  ()),
 )
 
 # Attribution speaks TURN COORDINATES — the same axis the timeline's real turn

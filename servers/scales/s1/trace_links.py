@@ -458,8 +458,9 @@ def gather(brain, session_id, streams=('surface', 'encode', 'touched'),
 
     `limit` is the session trace-pull bound (created_at DESC, so it keeps the
     most-recent traces — what the recent-turn window needs). Distinct from the
-    timeline's LIVED_SEQUENCE_PULL; a reusable adapter default, not a per-piece
-    constant. A consumer with a different need passes its own.
+    conversation reader's page (trace_contract.TURN_READ_MAX_ROWS); a reusable
+    adapter default, not a per-piece constant. A consumer with a different
+    need passes its own.
 
     `older_than` (ISO, strict `created_at <`) is the replay as-of bound —
     pushed through query_traces into SQL so the DESC LIMIT window sits at

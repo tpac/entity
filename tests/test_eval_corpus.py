@@ -15,7 +15,7 @@ require_eval()  # D-8: eval/ is absent from the public tree
 
 from eval.longmem.corpus import (
     corpus_config_hash, source_token, summarize_s2_deltas, merge_s2_totals,
-    counterpart_name, counterpart_token, frame_user_msg,
+    counterpart_name, counterpart_token, frame_user_msg, s2_did_work,
     COUNTERPART_NAMES, RESERVED_PERSONA_NAMES,
 )
 
@@ -240,3 +240,18 @@ class TestMergeS2Totals(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestS2DidWork(unittest.TestCase):
+    """The end-of-item flush loops until no unit acts."""
+
+    def test_any_acting_unit_is_work(self):
+        self.assertTrue(s2_did_work({'units': {'healer': {'actions': 0},
+                                               'consolidation': {'actions': 2}}}))
+
+    def test_skips_errors_and_shapes_without_units_are_quiet(self):
+        self.assertFalse(s2_did_work({'units': {'healer': {'skipped': True},
+                                                'community': {'error': 'x'},
+                                                'aspect': 'not a dict'}}))
+        self.assertFalse(s2_did_work({'skipped': True}))
+        self.assertFalse(s2_did_work(None))

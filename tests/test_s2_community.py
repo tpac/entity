@@ -100,6 +100,72 @@ class TestIntegrationUnitContract(unittest.TestCase):
         self.assertEqual(args.get('chain_id'), unit.chain_id())
         self.assertEqual(args.get('encoding_source'), 's2:test_op')
 
+    def test_encoder_dispatch_identity_is_the_units_not_the_models(self):
+        """Identity is assigned from the unit, never defaulted: an S2 unit is
+        sessionless whatever session the model writes into its tool call, and
+        a session unit's id replaces a stamp the model forged."""
+        import threading
+        from servers.dispatch_common import CALLER_SESSION_KEY, caller_session
+        from servers.scales.s2.base import IntegrationUnit
+
+        class TestUnit(IntegrationUnit):
+            NAME = 'test_op'
+            SCALE = 's2'
+            ENCODING_SOURCE = 's2:test_op'
+
+        class FakeBrain:
+            write_lock = threading.RLock()
+
+        written = {CALLER_SESSION_KEY: 'model-stamp', 'session_id': 'model-sid'}
+        args = dict(written, operations=[])
+        TestUnit(brain=FakeBrain())._make_encoder_dispatch()('brain_batch', args)
+        self.assertEqual(caller_session(args), '')
+
+        unit = TestUnit(brain=FakeBrain())
+        unit.session_id = 'unit-session'
+        args = dict(written, operations=[])
+        unit._make_encoder_dispatch()('brain_batch', args)
+        self.assertEqual(caller_session(args), 'unit-session')
+
+    def test_encoder_dispatch_wraps_an_injected_dispatch(self):
+        """An injected dispatch_fn (an eval's recorder, IsolatedBrain.dispatch)
+        executes the call but does not replace the unit's rules: the
+        operator-only refusal, identity and attribution apply before it runs,
+        so an eval arm writes as production does."""
+        from servers.dispatch_common import CALLER_SESSION_KEY
+        from servers.scales.s2.base import IntegrationUnit
+
+        class TestUnit(IntegrationUnit):
+            NAME = 'test_op'
+            SCALE = 's2'
+            ENCODING_SOURCE = 's2:test_op'
+
+        class FakeBrain:
+            def _log_error(self, *a, **k):
+                pass
+
+            def _log_warning(self, *a, **k):
+                pass
+
+        seen = []
+
+        def recorder(cmd, args):
+            seen.append((cmd, dict(args)))
+            return {'ok': True, 'result': {}}
+
+        unit = TestUnit(brain=FakeBrain(), dispatch_fn=recorder)
+        dispatch = unit._make_encoder_dispatch()
+        dispatch('brain_batch', {'operations': [], 'encoding_source': 'anchor',
+                                 CALLER_SESSION_KEY: 'model-stamp'})
+        refused = dispatch('set_node_lock', {'node_id': 'n1', 'locked': True})
+        self.assertEqual([cmd for cmd, _ in seen], ['brain_batch'],
+                         'set_node_lock reached the injected dispatch')
+        self.assertIs(refused.get('ok'), False)
+        args = seen[0][1]
+        self.assertEqual(args[CALLER_SESSION_KEY], '')
+        self.assertEqual(args['encoding_source'], 's2:test_op')
+        self.assertEqual(args['chain_id'], unit.chain_id())
+
 
 class TestCommunityDetectionContract(unittest.TestCase):
     """Test CommunityDetection declares its O/K sources."""

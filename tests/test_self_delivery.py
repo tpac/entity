@@ -16,16 +16,15 @@ from servers.daemon_hooks import hook_pre_edit, hook_post_response_track
 from servers.channels.self_channel import signal, self_contract
 
 
-def _seed(brain, to_stream, body):
-    """Queue a directed self-message from a different stream (so drain_inbox's
+def _seed(brain, to_session, body):
+    """Queue a directed self-message from a different session (so drain_inbox's
     'not your own' filter delivers it)."""
-    signal.send(brain, from_session='other-stream',
-                address=self_contract.address_for_stream(to_stream), body=body)
+    signal.send(brain, from_session='other-session',
+                address=self_contract.address_for_session(to_session), body=body)
 
 
-def _edit(brain, session_id, filename='auth.py'):
-    return hook_pre_edit(brain, {'filename': filename, 'tool_name': 'Edit',
-                                 'session_id': session_id}, [])
+def _edit(brain, session_id, path='auth.py'):
+    return hook_pre_edit(brain, {'path': path, 'session_id': session_id}, [])
 
 
 def _stop(brain, session_id):
@@ -35,9 +34,9 @@ def _stop(brain, session_id):
 
 
 def _pretool_ac(out):
-    """The additionalContext a PreToolUse hook surfaces to the model — the
-    channel that actually reaches Claude on allow (NOT `reason`)."""
-    return out.get('json', {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+    """The additionalContext the daemon hands the PreToolUse hook — the text
+    that reaches the model (the hook wraps it in hookSpecificOutput)."""
+    return out.get('json', {}).get('additionalContext', '')
 
 
 class TestPreToolDoesNotDeliver(BrainTestBase):
@@ -49,7 +48,7 @@ class TestPreToolDoesNotDeliver(BrainTestBase):
         _seed(self.brain, 'S', 'heads up: I am in auth.py')
         out = _edit(self.brain, 'S')
         self.assertNotIn('heads up: I am in auth.py', _pretool_ac(out))
-        self.assertEqual(out.get('json', {}).get('decision'), 'approve')
+        self.assertNotIn('decision', out.get('json', {}))
 
     def test_pretool_does_not_consume_tap(self):
         # The tap must survive PreToolUse so Stop can still deliver it.
@@ -57,10 +56,10 @@ class TestPreToolDoesNotDeliver(BrainTestBase):
         _edit(self.brain, 'S', 'x.py')
         self.assertEqual(_stop(self.brain, 'S').get('decision'), 'block')
 
-    def test_pretool_no_message_is_clean_approve(self):
-        """Regression: nothing pending → valid approve, no spurious self-block."""
+    def test_pretool_no_message_is_clean(self):
+        """Regression: nothing pending → no decision, no spurious self-block."""
         out = _edit(self.brain, 'S', 'y.py')
-        self.assertEqual(out.get('json', {}).get('decision'), 'approve')
+        self.assertNotIn('decision', out.get('json', {}))
         self.assertNotIn('🧵', _pretool_ac(out))
 
 

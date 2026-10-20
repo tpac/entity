@@ -146,12 +146,11 @@ def test_small_payload_is_unchanged_and_has_no_omission_notice():
 @pytest.mark.parametrize('view_policy', [False, True])
 def test_production_timeline_enforces_one_budget_and_preserves_messages(monkeypatch, view_policy):
     from tests.test_s1e_lived_sequence import _StubBrain
-    from servers.scales.s1.encode import _render_lived_sequence_timeline
+    from servers.scales.s1.encode import _render_lived_sequence_timeline, _window
 
-    episodes, messages = [], []
+    episodes = []
     for i in range(20):
         uid = 'u%d' % i
-        messages.append({'role': 'user', 'content': uid, 'trace_id': uid, 'id': uid})
         episodes.extend([
             {'id': uid, 'ref_type': 'user_message', 'summary': 'message-' + uid,
              'created_at': '2026-09-08T00:%02d:00' % i},
@@ -161,7 +160,8 @@ def test_production_timeline_enforces_one_budget_and_preserves_messages(monkeypa
         ])
     monkeypatch.setenv('BRAIN_ACTIONS_MAX_LINES', '4')
     monkeypatch.setenv('BRAIN_ACTIONS_MAX_BYTES', '512')
-    rendered = _render_lived_sequence_timeline(_StubBrain(episodes), 'session', messages,
+    brain = _StubBrain(episodes)
+    rendered = _render_lived_sequence_timeline(brain, 'session', _window(brain, 'session'),
                                               view_policy=view_policy)
     root = ET.fromstring('<timeline>' + rendered + '</timeline>')
     assert len(root.findall('turn/actions')) == 3

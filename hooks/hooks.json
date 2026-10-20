@@ -1,5 +1,5 @@
 {
-  "description": "Brain plugin hooks: boot, recall, turn recording, safety, lifecycle",
+  "description": "Brain plugin hooks: boot, recall, turn recording, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -32,16 +32,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-edit-suggest.sh\"",
-            "timeout": 8
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-bash-safety.sh\"",
             "timeout": 8
           }
         ]

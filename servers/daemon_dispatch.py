@@ -37,11 +37,12 @@ from .dispatch_observability import (
     _handle_clear_interaction_override,
 )
 from .dispatch_ops import (
-    _handle_ping, _handle_get_config, _handle_pre_edit,
+    _handle_ping, _handle_get_config,
     _handle_save, _handle_reset_session, _handle_set_config,
     _handle_eval,
     _handle_drop_sys_revision_history,
-    _handle_s2_force, _handle_drain_embeddings,
+    _handle_s2_force, _handle_drain_embeddings, _handle_gate,
+    _handle_set_api_key,
 )
 from .dispatch_self import (
     _handle_self_presence, _handle_self_peek, _handle_self_send, _handle_self_inbox,
@@ -56,7 +57,6 @@ COMMAND_TABLE: Dict[str, CmdEntry] = {
     "context_boot":             CmdEntry(_handle_context_boot,         is_write=False),
     "recall":                   CmdEntry(_handle_recall,               is_write=False),
     "get_config":               CmdEntry(_handle_get_config,           is_write=False),
-    "pre_edit":                 CmdEntry(_handle_pre_edit,             is_write=False),
 
     # ── Self channel — presence (read-only) + signal (writes brain_logs.db,
     #    lock-guarded inside signal.py, so is_write=False at the daemon layer) ──
@@ -67,7 +67,7 @@ COMMAND_TABLE: Dict[str, CmdEntry] = {
     "self_inbox_peek":          CmdEntry(_handle_self_inbox_peek,      is_write=False),
     "self_outbox":              CmdEntry(_handle_self_outbox,          is_write=False),
 
-    # ── Thalamus — the brain speaking to its streams (writes brain_logs.db,
+    # ── Thalamus — the brain speaking to its sessions (writes brain_logs.db,
     #    lock-guarded inside thalamus.py, so is_write=False at the daemon layer) ──
     "remind":                   CmdEntry(_handle_remind,               is_write=False),
     "thalamus_list":            CmdEntry(_handle_thalamus_list,        is_write=False),
@@ -86,6 +86,10 @@ COMMAND_TABLE: Dict[str, CmdEntry] = {
     "save":                CmdEntry(_handle_save,               is_write=True, marks_dirty=False),
     "reset_session":       CmdEntry(_handle_reset_session,      is_write=True, marks_dirty=True),
     "set_config":          CmdEntry(_handle_set_config,         is_write=True, marks_dirty=True),
+    # The run switch and the API key write the user env file, not a brain
+    # database — the daemon is that file's one Python writer.
+    "gate":                CmdEntry(_handle_gate,               is_write=False, marks_dirty=False),
+    "set_api_key":         CmdEntry(_handle_set_api_key,        is_write=False, marks_dirty=False),
     "remember":              CmdEntry(_handle_remember_command,     is_write=True, marks_dirty=True),
     "remember_batch":        CmdEntry(_handle_remember_batch,      is_write=True, marks_dirty=True),
     "revise":                CmdEntry(_handle_revise,               is_write=True, marks_dirty=True),

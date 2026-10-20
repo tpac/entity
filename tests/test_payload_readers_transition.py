@@ -229,6 +229,26 @@ class TestFailedEncodeResidue(BrainTestBase):
         from servers.scales.s1.encode import _render_failed_encodes
         self.assertEqual(_render_failed_encodes(self.brain, 'sess-clean'), '')
 
+    def test_read_failure_is_logged_per_session(self):
+        """Codex ids opened in the same minute share their first 8 chars; the
+        error names each session by its own short, so the 60 s dedup
+        fingerprint keeps the two failures as two rows."""
+        from unittest import mock
+        from servers.scales.s1.encode import _render_failed_encodes
+
+        def rows():
+            return self.brain.logs_conn.execute(
+                "SELECT COUNT(*) FROM debug_log WHERE event_type='error' "
+                "AND source='s1e_failed_encodes_block'").fetchone()[0]
+
+        before = rows()
+        with mock.patch.object(self.brain, 'query_traces',
+                               side_effect=RuntimeError('database is locked')):
+            for sid in ('01a122b6-9059-7ca1-bb1b-a5e6ff4ce0cf',
+                        '01a122b6-f3c2-7d10-8e4a-17c09b2d5e61'):
+                self.assertEqual(_render_failed_encodes(self.brain, sid), '')
+        self.assertEqual(rows(), before + 2)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -903,18 +903,25 @@ class TestMomentStack(BrainTestBase):
     SESS = 'sess-moment'
     T = ['2026-05-01T00:00:%02d.000000+00:00' % i for i in range(20)]
 
-    def _mk_row(self, tid, ref_type, content, created, with_vec=True):
-        """One conversational trace row in the get_session_turns shape
-        (event_type 'K', content in metadata) + its embedding row."""
+    def _mk_row(self, tid, ref_type, content, created, with_vec=True,
+                host_turn=None, chain='s0-momsess-1'):
+        """One conversational trace row as the S0 write door stores it
+        (event_type 'K', content in metadata) + its embedding row.
+        `host_turn` stamps the host's name for the turn, as the prompt
+        hook's write door does."""
         import json as _json
         import servers.embedder as embedder
+        from servers.trace_contract import HOST_TURN_FIELD
+        meta = {'content': content}
+        if host_turn:
+            meta[HOST_TURN_FIELD] = host_turn
         dal = self.brain._trace_dal
         dal.conn.execute(
             "INSERT INTO trace_events (id, chain_id, scale, event_type,"
             " ref_type, ref_id, summary, metadata, session_id, created_at)"
             " VALUES (?, ?, 's0', 'K', ?, 'r', ?, ?, ?, ?)",
-            (tid, 's0-momsess-1', ref_type, content[:80],
-             _json.dumps({'content': content}), self.SESS, created))
+            (tid, chain, ref_type, content[:80],
+             _json.dumps(meta), self.SESS, created))
         if with_vec:
             blob = embedder.embed_query(content)     # packed float32 blob
             if not isinstance(blob, (bytes, bytearray)):
@@ -932,10 +939,9 @@ class TestMomentStack(BrainTestBase):
                          self.T[2 * i + 1])
 
     def test_correspondent_rows_dropped_from_moment_stack(self):
-        # A dial-on delivery row reaching get_conversation must not occupy a
-        # j-slot (it has no vector in the pinned matrix) — it is dropped
-        # entirely, counted under its OWN ledger key (machine_dropped keeps
-        # the slot; this drop removes the row — different shapes).
+        # A dial-on delivery row riding in a turn (it has no vector in the
+        # pinned matrix) never becomes an entry and holds no slot of its
+        # own — counted under its own ledger key, apart from the harness's.
         from unittest import mock
         from servers import trace_contract as tc
         self._mk_turn(0, 'real question', 'real answer')
@@ -1027,6 +1033,174 @@ class TestMomentStack(BrainTestBase):
         self.assertEqual({(s, j) for s, j, _v, _t in stack2},
                          {('a', 1), ('o', 2), ('a', 2)})
 
+    def test_message_typed_mid_turn_shares_its_openers_slot(self):
+        # The host named both messages one turn: the steer rides in its
+        # opener's slot as a second o entry. With no cue, the in-flight
+        # turn, both its messages, is the live edge.
+        self._mk_row('mtu00', 'user_message', 'tell me about submarines',
+                     self.T[0], host_turn='p1')
+        self._mk_row('mtu01', 'user_message', 'and their sonar too',
+                     self.T[1], host_turn='p1')
+        self._mk_row('mta01', 'assistant_message', 'sonar arrays, mostly',
+                     self.T[2])
+        self._mk_row('mtu03', 'user_message', 'and propulsion?',
+                     self.T[3], host_turn='p2')
+        self._mk_row('mta03', 'assistant_message', 'nuclear or diesel',
+                     self.T[4])
+        self._mk_row('mtu05', 'user_message', 'what about ballast',
+                     self.T[5], host_turn='p3')
+        self._mk_row('mtu06', 'user_message', 'and trim tanks',
+                     self.T[6], host_turn='p3')
+        eng = self._engine()
+        stack, ledger = eng._moment_stack(self.brain, self.SESS, 3)
+        self.assertEqual(ledger['live_edge_dropped'], 1)
+        self.assertEqual(ledger['turns'], 2)
+        self.assertEqual(sorted((s, j, t) for s, j, _v, t in stack), [
+            ('a', 1, 'nuclear or diesel'), ('a', 2, 'sonar arrays, mostly'),
+            ('o', 1, 'and propulsion?'), ('o', 2, 'and their sonar too'),
+            ('o', 2, 'tell me about submarines')])
+
+    def test_unstamped_operator_rows_keep_a_slot_each(self):
+        self._mk_turn(0, 'delete the old folder')
+        self._mk_turn(1, 'wait, list it first', 'listed, nothing deleted')
+        self._mk_turn(2, 'good', 'done')
+        eng = self._engine()
+        stack, _ledger = eng._moment_stack(self.brain, self.SESS, 3)
+        self.assertEqual({(s, j) for s, j, _v, _t in stack},
+                         {('o', 1), ('a', 1), ('o', 2), ('a', 2), ('o', 3)})
+
+    def test_a_slots_stronger_message_counts_even_when_it_came_first(self):
+        # Two operator messages in one slot: the slot keeps the stronger per
+        # node, so the submarine question lifts the submarine node although
+        # an unrelated steer came after it in the same turn.
+        import servers.embedder as embedder
+        sub = self.brain.remember(
+            type='lesson', title='Submarine sonar arrays',
+            content='Attack submarines mount bow sonar arrays.')['id']
+        ada = self.brain.remember(
+            type='lesson', title='Garden tomato watering',
+            content='Water tomato plants at the roots, mornings.')['id']
+        self._mk_row('mtu00', 'user_message', 'tell me about attack submarines',
+                     self.T[0], host_turn='p1')
+        self._mk_row('mtu01', 'user_message', 'also keep it short',
+                     self.T[1], host_turn='p1')
+        self._mk_row('mta01', 'assistant_message', 'short version follows',
+                     self.T[2])
+        query = 'watering the garden tomatoes'
+        qv = embedder.embed_query(query)
+        eng = self._engine(moment_K=1, moment_gains={'maxsim_o1': 8.0})
+        mom_map, _ = eng.scores(self.brain, query, qv, session_id=self.SESS)
+        self.assertGreater(mom_map[sub], mom_map[ada])
+
+    def test_mid_turn_cue_keeps_its_opener_at_o1(self):
+        # A opens a turn, B is typed while it runs, C comes after the reply.
+        # Live, the window ends just before the cue: at B, A is the newest
+        # turn's message at o1; at C, A and B share o1 with the reply.
+        # Replay (as_of, no cue) at B drops A's open turn, as it always did.
+        self._mk_row('mtu00', 'user_message', 'tell me about submarines',
+                     self.T[0], host_turn='p0')
+        self._mk_row('mta00', 'assistant_message', 'sonar arrays, mostly',
+                     self.T[1])
+        self._mk_row('mtu02', 'user_message', 'what about ballast',
+                     self.T[2], host_turn='p1')
+        self._mk_row('mtu03', 'user_message', 'and trim tanks',
+                     self.T[3], host_turn='p1')
+        self._mk_row('mta03', 'assistant_message', 'both flood to dive',
+                     self.T[4])
+        self._mk_row('mtu05', 'user_message', 'and surfacing?',
+                     self.T[5], host_turn='p2')
+        eng = self._engine()
+
+        def slots(stack):
+            return sorted((s, j, t) for s, j, _v, t in stack)
+        at_b, led_b = eng._moment_stack(self.brain, self.SESS, 3,
+                                        cue_trace_id='mtu03')
+        self.assertEqual(led_b['live_edge_dropped'], 0)
+        self.assertEqual(slots(at_b), [
+            ('a', 2, 'sonar arrays, mostly'), ('o', 1, 'what about ballast'),
+            ('o', 2, 'tell me about submarines')])
+        at_c, _led = eng._moment_stack(self.brain, self.SESS, 3,
+                                       cue_trace_id='mtu05')
+        self.assertEqual(slots(at_c), [
+            ('a', 1, 'both flood to dive'), ('a', 2, 'sonar arrays, mostly'),
+            ('o', 1, 'and trim tanks'), ('o', 1, 'what about ballast'),
+            ('o', 2, 'tell me about submarines')])
+        replay_b, led_rb = eng._moment_stack(self.brain, self.SESS, 3,
+                                             as_of=self.T[3])
+        self.assertEqual(led_rb['live_edge_dropped'], 1)
+        self.assertEqual(slots(replay_b), [
+            ('a', 1, 'sonar arrays, mostly'),
+            ('o', 1, 'tell me about submarines')])
+
+    def test_cue_from_another_speaker_keeps_the_operators_opener(self):
+        # A subagent's report and a session's message arriving mid-turn fire
+        # recall on their own text. The cut is keyed on the cue's row, so the
+        # operator's opener stays at o1 — a rule that dropped the newest
+        # operator message would drop it.
+        self._mk_row('mtu00', 'user_message', 'tell me about submarines',
+                     self.T[0], host_turn='p0')
+        self._mk_row('mta00', 'assistant_message', 'sonar arrays, mostly',
+                     self.T[1])
+        self._mk_row('mtu02', 'user_message', 'what about ballast',
+                     self.T[2], host_turn='p1')
+        self._mk_row('mts03', 'subagent_message', 'report: ballast tanks',
+                     self.T[3], with_vec=False)
+        self._mk_row('mts04', 'self_message', 'from a sibling session',
+                     self.T[4], with_vec=False)
+        eng = self._engine()
+        for cue, riders in (('mts03', 0), ('mts04', 1)):
+            stack, ledger = eng._moment_stack(self.brain, self.SESS, 3,
+                                              cue_trace_id=cue)
+            texts = {(s, j): t for s, j, _v, t in stack}
+            self.assertEqual(texts[('o', 1)], 'what about ballast', cue)
+            self.assertNotIn(('a', 1), texts, cue)
+            self.assertEqual(texts[('o', 2)], 'tell me about submarines', cue)
+            # the report rides in A's turn once it is behind the cut
+            self.assertEqual(ledger['correspondent_dropped'], riders, cue)
+
+    def test_harness_opened_turn_keeps_its_slot_without_an_o_entry(self):
+        # A harness notice on its own chain opens a turn: the slot and its
+        # reply stay (W2), the notice is no operator message.
+        self._mk_turn(0, 'tell me about submarines', 'sonar arrays, mostly')
+        self._mk_row('mte02', 'env_message', 'background task finished',
+                     self.T[2], with_vec=False, chain='s0-momsess-2')
+        self._mk_row('mta03', 'assistant_message', 'noted the task result',
+                     self.T[3], chain='s0-momsess-2')
+        self._mk_row('mtu04', 'user_message', 'and propulsion?', self.T[4],
+                     chain='s0-momsess-3')
+        self._mk_row('mta05', 'assistant_message', 'nuclear or diesel',
+                     self.T[5], chain='s0-momsess-3')
+        eng = self._engine()
+        stack, ledger = eng._moment_stack(self.brain, self.SESS, 3)
+        self.assertEqual(ledger['machine_dropped'], 1)
+        self.assertEqual(sorted((s, j, t) for s, j, _v, t in stack), [
+            ('a', 1, 'nuclear or diesel'), ('a', 2, 'noted the task result'),
+            ('a', 3, 'sonar arrays, mostly'), ('o', 1, 'and propulsion?'),
+            ('o', 3, 'tell me about submarines')])
+
+    def test_recall_threads_the_cue_to_the_stack(self):
+        # brain.recall(cue_trace_id=) reaches _moment_stack, and the result
+        # cache keys on it: the same text under another cue is recomputed.
+        from servers.recall_laf import get_engine
+        import time as _t
+        self._mk_turn(0, 'tell me about submarines', 'sonar arrays, mostly')
+        eng = get_engine(self.brain)
+        eng._cfg = dict(DEFAULT_CONFIG, moment_K=2,
+                        moment_gains={'maxsim_o1': 1.0})
+        eng._cfg_ts = _t.monotonic() + 3600
+        cues = []
+        real = eng._moment_stack
+
+        def spy(brain, session_id, K, as_of=None, cue_trace_id=None):
+            cues.append(cue_trace_id)
+            return real(brain, session_id, K, as_of=as_of,
+                        cue_trace_id=cue_trace_id)
+        eng._moment_stack = spy
+        for cue in ('mtu00', 'mtu00', 'mta00'):
+            self.brain.recall(query='submarine sonar', session_id=self.SESS,
+                              cue_trace_id=cue, mark_accessed=False)
+        self.assertEqual(cues, ['mtu00', 'mta00'])
+
     def test_asof_deep_history_positions_window_at_asof(self):
         # Regression (2026-08-07 fetch-then-filter sweep): get_conversation
         # pulls newest-first LIMIT 4K+8; the old Python `< as_of` post-filter
@@ -1037,11 +1211,12 @@ class TestMomentStack(BrainTestBase):
         for i in range(10):
             self._mk_turn(i, 'question %d about topic' % i, 'answer %d' % i)
         eng = self._engine()
-        # K=1 → 12-row window; 14 rows exist after T[6] — the old pull
-        # contained not a single pre-as_of row
+        # K=1: 14 rows exist after T[6] — a newest-first pull with a
+        # Python-side cut would hold not a single pre-as_of row. The reader
+        # reads K+1 turns at as_of (one spare for the live-edge rule).
         stack, ledger = eng._moment_stack(self.brain, self.SESS, 1,
                                           as_of=self.T[6])
-        self.assertEqual(ledger['rows'], 6)
+        self.assertEqual(ledger['rows'], 4)
         self.assertEqual(ledger['turns'], 1)
         texts = {(s, j): t for s, j, _v, t in stack}
         self.assertEqual(texts[('o', 1)], 'question 2 about topic')

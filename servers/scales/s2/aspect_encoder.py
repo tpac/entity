@@ -147,8 +147,7 @@ class AspectEncoder(IntegrationUnit):
                                            journal=True)
 
         if result is None:
-            err = 'LLM call failed'
-            self.brain._log_error(self.NAME, Exception(err), 'classifying %d proposals' % len(proposals))
+            err = telemetry['failure']   # _call_llm already logged the cause
             self._trace_failed_delta(err, telemetry, len(proposals))
             return {'classified': 0, 'rejected': 0, 'errors': [err], 'journal': ''}
 
